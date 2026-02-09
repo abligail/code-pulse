@@ -1,18 +1,20 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Send, Plus, Loader2, RotateCcw } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Send, Plus, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { PageHeader, PageHeaderActions, PageHeaderDescription, PageHeaderHeading, PageHeaderMeta, PageHeaderTitle } from '@/components/ui/page-header';
 import { ClientIcon } from '@/components/client-icon';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
-import { getActiveUser, getLastQuestion, setLastQuestion, type LastQuestion } from '@/lib/auth/session';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { getActiveUser, setLastQuestion } from '@/lib/auth/session';
 
 interface ChatMessage {
   id: string;
@@ -28,6 +30,7 @@ interface AssistantCardItem {
   description?: string;
   question?: string;
   relationship?: string;
+  source?: string;
 }
 
 interface StoredChatMessage {
@@ -65,11 +68,61 @@ interface UserProfileResponse {
   weak_knowledge?: WeakKnowledgePoint[];
 }
 
+interface WeakQuizQuestion {
+  question_type: '选择题' | '填空题' | '简答题' | string;
+  question_stem: string;
+  options: string[];
+  blank_count: number;
+  reference_answer: string;
+  answer_analysis: string;
+}
+
+interface WeakQuizPayload {
+  knowledge_id: string;
+  knowledge_name: string;
+  knowledge_category: string[];
+  questions: WeakQuizQuestion[];
+}
+
+interface QuizCacheEntry {
+  payload: WeakQuizPayload;
+  used: boolean;
+  updatedAt: string;
+}
+
+type QuizCheckState = 'correct' | 'wrong' | 'skip';
+
+const readInitialQuizCache = (): Record<string, QuizCacheEntry> => {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem('code-pulse/weak-quiz-cache');
+    if (raw) {
+      const parsed = JSON.parse(raw) as Record<string, QuizCacheEntry>;
+      return parsed;
+    }
+  } catch (error) {
+    console.error('Failed to read quiz cache', error);
+  }
+  return {};
+};
+
+const stripOptionLabel = (text: string): string => {
+  // Remove leading option labels like "A.", "B、", etc.
+  return text.replace(/^[A-Da-dＡ-Ｄａ-ｄ][\.．、:：\s-]+/, '').trim();
+};
+
+const splitAnswers = (text: string): string[] => {
+  return text
+    .split(/[;；、，]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+};
+
 export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [lastQuestion, setLastQuestionState] = useState<LastQuestion | null>(null);
+  // Last question persisted only in storage; no in-memory display needed
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
@@ -77,22 +130,49 @@ export default function ChatPage() {
   const [weakPoints, setWeakPoints] = useState<WeakKnowledgePoint[]>([]);
   const [weakLoading, setWeakLoading] = useState(false);
   const [weakError, setWeakError] = useState<string | null>(null);
+  const [quizOpen, setQuizOpen] = useState(false);
+  const [quizLoading, setQuizLoading] = useState(false);
+  const [quizError, setQuizError] = useState<string | null>(null);
+  const [quizMeta, setQuizMeta] = useState<WeakQuizPayload | null>(null);
+  const [quizQuestions, setQuizQuestions] = useState<WeakQuizQuestion[]>([]);
+  const [quizAnswers, setQuizAnswers] = useState<string[]>([]);
+  const [quizSubmitted, setQuizSubmitted] = useState(false);
+  const [quizChecks, setQuizChecks] = useState<QuizCheckState[]>([]);
+  const [quizReview, setQuizReview] = useState('');
+  const [quizReviewLoading, setQuizReviewLoading] = useState(false);
+  const [quizReviewError, setQuizReviewError] = useState<string | null>(null);
+  const [quizCache, setQuizCache] = useState<Record<string, QuizCacheEntry>>(() => readInitialQuizCache());
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const quizCacheRef = useRef<Record<string, QuizCacheEntry>>(quizCache);
+  const [activeWeakPoint, setActiveWeakPoint] = useState<WeakKnowledgePoint | null>(null);
 
   const STORAGE_KEY = 'code-pulse/chat-sessions';
+  const QUIZ_CACHE_KEY = 'code-pulse/weak-quiz-cache';
+  const SESSION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+  const pruneSessions = useCallback((list: ChatSession[]) => {
+    const now = Date.now();
+    return list.filter((session) => {
+      const updatedAt = new Date(session.updatedAt).getTime();
+      return Number.isFinite(updatedAt) && now - updatedAt <= SESSION_RETENTION_MS;
+    });
+  }, [SESSION_RETENTION_MS]);
 
   // Load history from localStorage on mount
   useEffect(() => {
     const user = getActiveUser();
-    setLastQuestionState(getLastQuestion(user?.userId));
     void loadWeakPoints(user?.userId ?? 'guest');
 
     try {
       const raw = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null;
       if (raw) {
         const stored: ChatSession[] = JSON.parse(raw);
-        const prepared = stored.map((session) => ({
+        const recent = pruneSessions(stored);
+        if (recent.length !== stored.length && typeof window !== 'undefined') {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(recent));
+        }
+        const prepared = recent.map((session) => ({
           ...session,
           messages: session.messages.map((m) => ({ ...m, timestamp: m.timestamp })),
         }));
@@ -136,7 +216,21 @@ export default function ChatPage() {
     if (typeof window !== 'undefined') {
       localStorage.setItem(STORAGE_KEY, JSON.stringify([initialSession]));
     }
-  }, []);
+  }, [pruneSessions]);
+
+  // Persist quiz cache
+  useEffect(() => {
+    quizCacheRef.current = quizCache;
+  }, [quizCache]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.setItem(QUIZ_CACHE_KEY, JSON.stringify(quizCache));
+    } catch (error) {
+      console.error('Failed to persist quiz cache', error);
+    }
+  }, [quizCache]);
 
   // Auto-scroll to bottom when new messages arrive unless user has scrolled up
   useEffect(() => {
@@ -194,12 +288,13 @@ export default function ChatPage() {
           messages: storedMessages,
         });
       }
+      const pruned = pruneSessions(nextSessions);
       if (typeof window !== 'undefined') {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextSessions));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(pruned));
       }
-      return nextSessions;
+      return pruned;
     });
-  }, [messages, conversationId, currentSessionId]);
+  }, [messages, conversationId, currentSessionId, pruneSessions]);
 
   const formatMessageTime = (date: Date) =>
     date.toLocaleTimeString('zh-CN', {
@@ -231,6 +326,7 @@ export default function ChatPage() {
               description: item.description ? String(item.description) : undefined,
               question: item.question ? String(item.question) : undefined,
               relationship: item.relationship ? String(item.relationship) : undefined,
+              source: item.source ? String(item.source) : undefined,
             }))
             .filter((item) => item.title || item.question || item.description);
         }
@@ -252,6 +348,8 @@ export default function ChatPage() {
             current.description = value;
           } else if (k === 'relationship') {
             current.relationship = value;
+          } else if (k === 'source') {
+            current.source = value;
           }
         }
         if (current.title || current.question || current.description) items.push(current);
@@ -289,6 +387,339 @@ export default function ChatPage() {
       setWeakLoading(false);
     }
   };
+
+  const fetchWeakQuizPayload = useCallback(async (point: WeakKnowledgePoint): Promise<WeakQuizPayload | null> => {
+    const user = getActiveUser();
+    const userId = user?.userId ?? 'guest';
+    const workflowInput = {
+      user_id: userId,
+      knowledge_point: point,
+      requested_at: new Date().toISOString(),
+    };
+    const inputStr = JSON.stringify(workflowInput, null, 2);
+    const res = await fetch('https://api.coze.cn/v1/workflow/stream_run', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer pat_xNxZkXWRfLm3CJKLtAd9infadFtKKbzcpqn7YdsmvfZmq1pZYoJbLLvc58WAhyTr',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        workflow_id: '7604323814663634954',
+        parameters: {
+          input: inputStr,
+        },
+      }),
+    });
+
+    if (!res.body) throw new Error('Empty response');
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let payload: WeakQuizPayload | null = null;
+    let fallbackText = '';
+
+    const asRecord = (value: unknown): Record<string, unknown> | null =>
+      value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+
+    const normalizePayload = (obj: Record<string, unknown> | null): WeakQuizPayload | null => {
+      if (!obj) return null;
+      const questions = obj.questions;
+      if (Array.isArray(questions)) {
+        return {
+          knowledge_id: String(obj.knowledge_id ?? ''),
+          knowledge_name: String(obj.knowledge_name ?? ''),
+          knowledge_category: Array.isArray(obj.knowledge_category) ? (obj.knowledge_category as string[]) : [],
+          questions: questions as WeakQuizQuestion[],
+        };
+      }
+      const output = asRecord(obj.output);
+      if (output && Array.isArray(output.questions)) {
+        return {
+          knowledge_id: String(output.knowledge_id ?? obj.knowledge_id ?? ''),
+          knowledge_name: String(output.knowledge_name ?? obj.knowledge_name ?? ''),
+          knowledge_category: Array.isArray(output.knowledge_category)
+            ? (output.knowledge_category as string[])
+            : Array.isArray(obj.knowledge_category)
+              ? (obj.knowledge_category as string[])
+              : [],
+          questions: output.questions as WeakQuizQuestion[],
+        };
+      }
+      return null;
+    };
+
+    const tryApplyPayload = (text: string) => {
+      if (!text) return null;
+      // Try direct parse
+      try {
+        const parsedDirect = JSON.parse(text) as unknown;
+        const directObj = asRecord(parsedDirect);
+        const normalized = normalizePayload(directObj);
+        if (normalized) return normalized;
+      } catch {
+        // ignore
+      }
+      const match = text.match(/\{[\s\S]*\}/);
+      if (!match) return null;
+      try {
+        const parsed = JSON.parse(match[0]) as unknown;
+        const parsedObj = asRecord(parsed);
+        return normalizePayload(parsedObj);
+      } catch (err) {
+        console.error('Quiz parse failed chunk', err, match[0]?.slice(0, 160));
+      }
+      return null;
+    };
+
+    const handleDataContent = (content: string) => {
+      fallbackText += `${content}\n`;
+      try {
+        const parsed = JSON.parse(content) as unknown;
+        const parsedObj = asRecord(parsed);
+        const normalized = normalizePayload(parsedObj);
+        if (normalized) return normalized;
+
+        const innerRaw = parsedObj?.data ?? parsedObj?.output ?? parsedObj?.result ?? parsedObj?.content ?? null;
+        const innerStr = typeof innerRaw === 'string' ? innerRaw : null;
+        if (innerStr) {
+          const innerNormalized = tryApplyPayload(innerStr);
+          if (innerNormalized) return innerNormalized;
+          try {
+            const innerParsed = JSON.parse(innerStr) as unknown;
+            const innerObj = asRecord(innerParsed);
+            const fromInner = normalizePayload(innerObj);
+            if (fromInner) return fromInner;
+            const innerDeep = asRecord(innerObj?.output ?? innerObj?.data ?? null);
+            const fromDeep = normalizePayload(innerDeep);
+            if (fromDeep) return fromDeep;
+          } catch {
+            const maybe = tryApplyPayload(innerStr);
+            if (maybe) return maybe;
+          }
+        }
+      } catch {
+        const maybe = tryApplyPayload(content);
+        if (maybe) return maybe;
+      }
+      return null;
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (trimmed.startsWith('data:')) {
+          const content = trimmed.slice(5).trim();
+          const maybePayload = handleDataContent(content);
+          if (maybePayload) {
+            payload = maybePayload;
+          }
+        }
+      }
+      if (payload) break;
+    }
+
+    if (!payload) {
+      payload = tryApplyPayload(buffer) || tryApplyPayload(fallbackText);
+    }
+
+    return payload;
+  }, []);
+
+  const ensureQuizCacheForPoint = useCallback(
+    async (point: WeakKnowledgePoint, options?: { forceRefresh?: boolean }) => {
+      const existing = quizCacheRef.current[point.knowledge_id];
+      if (existing && !existing.used && !options?.forceRefresh) {
+        return existing.payload;
+      }
+
+      const payload = await fetchWeakQuizPayload(point);
+      if (!payload || !Array.isArray(payload.questions)) return null;
+      setQuizCache((prev) => ({
+        ...prev,
+        [point.knowledge_id]: {
+          payload,
+          used: false,
+          updatedAt: new Date().toISOString(),
+        },
+      }));
+      return payload;
+    },
+    [fetchWeakQuizPayload]
+  );
+
+  useEffect(() => {
+    if (weakPoints.length === 0) return;
+    const prefetch = async () => {
+      for (const point of weakPoints) {
+        try {
+          await ensureQuizCacheForPoint(point);
+        } catch (error) {
+          console.error('Prefetch weak quiz failed', error);
+        }
+      }
+    };
+    void prefetch();
+  }, [weakPoints, ensureQuizCacheForPoint]);
+
+  const fetchWeakQuiz = async (point: WeakKnowledgePoint) => {
+    setQuizLoading(true);
+    setQuizError(null);
+    setQuizSubmitted(false);
+    setQuizQuestions([]);
+    setQuizAnswers([]);
+    try {
+      const payload = await ensureQuizCacheForPoint(point, { forceRefresh: true });
+
+      if (!payload || !Array.isArray(payload.questions)) {
+        throw new Error('Invalid quiz payload');
+      }
+
+      setQuizMeta(payload);
+      setQuizQuestions(payload.questions);
+      setQuizAnswers(payload.questions.map(() => ''));
+      setQuizChecks(payload.questions.map(() => 'skip'));
+      setQuizReview('');
+      setQuizReviewError(null);
+    } catch (error) {
+      console.error('Failed to fetch quiz', error);
+      setQuizError('题目生成失败，请稍后再试');
+    } finally {
+      setQuizLoading(false);
+    }
+  };
+
+  const submitQuizReview = useCallback(
+    async (checks: QuizCheckState[]) => {
+      if (!quizMeta || quizQuestions.length === 0) return;
+      const user = getActiveUser();
+      const userId = user?.userId ?? 'guest';
+      setQuizReviewLoading(true);
+      setQuizReviewError(null);
+      setQuizReview('');
+
+      const questionsWithAnswers = quizQuestions.map((q, idx) => ({
+        ...q,
+        user_answer: quizAnswers[idx] || '',
+      }));
+
+      const userReply = questionsWithAnswers
+        .map((q, idx) => {
+          const prefix = `Q${idx + 1}`;
+          return `${prefix}（${q.question_type}）：${q.user_answer || '未作答'}`;
+        })
+        .join('；');
+
+      const inputStr = `【题目信息】：${JSON.stringify(
+        {
+          knowledge_id: quizMeta.knowledge_id,
+          knowledge_name: quizMeta.knowledge_name,
+          knowledge_category: quizMeta.knowledge_category ?? [],
+          questions: questionsWithAnswers,
+          check_results: checks,
+        },
+        null,
+        2
+      )}
+【用户回复】：${userReply}`;
+
+      try {
+        const res = await fetch('https://api.coze.cn/v1/workflow/stream_run', {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer pat_xNxZkXWRfLm3CJKLtAd9infadFtKKbzcpqn7YdsmvfZmq1pZYoJbLLvc58WAhyTr',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            workflow_id: '7604502251185750026',
+            parameters: {
+              input: inputStr,
+              uuid: userId,
+            },
+          }),
+        });
+
+        if (!res.body) throw new Error('Empty response');
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let reviewText = '';
+
+        const tryParse = (text: string): string | null => {
+          if (!text) return null;
+          try {
+            const parsed = JSON.parse(text) as Record<string, unknown>;
+            if (typeof parsed.output === 'string') return parsed.output;
+            if (typeof parsed.content === 'string') {
+              try {
+                const inner = JSON.parse(parsed.content) as Record<string, unknown>;
+                if (typeof inner.output === 'string') return inner.output;
+              } catch {
+                /* ignore inner parse */
+              }
+            }
+          } catch {
+            /* noop */
+          }
+          const match = text.match(/\{[\s\S]*\}/);
+          if (match) {
+            try {
+              const parsed = JSON.parse(match[0]) as Record<string, unknown>;
+              if (typeof parsed.output === 'string') return parsed.output;
+              if (typeof parsed.content === 'string') {
+                try {
+                  const inner = JSON.parse(parsed.content) as Record<string, unknown>;
+                  if (typeof inner.output === 'string') return inner.output;
+                } catch {
+                  return null;
+                }
+              }
+            } catch {
+              return null;
+            }
+          }
+          return null;
+        };
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            if (trimmed.startsWith('data:')) {
+              const content = trimmed.slice(5).trim();
+              const parsed = tryParse(content);
+              if (parsed) reviewText = parsed;
+            }
+          }
+          if (reviewText) break;
+        }
+
+        if (!reviewText) {
+          reviewText = tryParse(buffer) || buffer.trim();
+        }
+
+        setQuizReview(reviewText);
+      } catch (error) {
+        console.error('Quiz review failed', error);
+        setQuizReviewError('解析获取失败，请稍后重试');
+      } finally {
+        setQuizReviewLoading(false);
+      }
+    },
+    [quizMeta, quizQuestions, quizAnswers]
+  );
 
   const handleSendMessage = async (message: string) => {
     if (!message.trim() || isLoading) return;
@@ -434,7 +865,6 @@ export default function ChatPage() {
         title: message,
         askedAt: new Date().toISOString(),
       };
-      setLastQuestionState(nextLastQuestion);
       setLastQuestion(user?.userId, nextLastQuestion);
     } catch (error) {
       console.error('Failed to send message:', error);
@@ -489,14 +919,90 @@ export default function ChatPage() {
     });
   };
 
-  const handleReviewLast = () => {
-    if (!lastQuestion) return;
-    handleSendMessage(lastQuestion.title);
+  const openQuizForWeakPoint = (point: WeakKnowledgePoint) => {
+    setQuizOpen(true);
+    setQuizError(null);
+    setQuizSubmitted(false);
+    setQuizChecks([]);
+    setQuizReview('');
+    setQuizReviewError(null);
+    setQuizReviewLoading(false);
+    setActiveWeakPoint(point);
+    const cached = quizCache[point.knowledge_id];
+    if (cached && !cached.used && cached.payload) {
+      setQuizMeta(cached.payload);
+      setQuizQuestions(cached.payload.questions);
+      setQuizAnswers(cached.payload.questions.map(() => ''));
+      setQuizChecks(cached.payload.questions.map(() => 'skip'));
+      setQuizLoading(false);
+      return;
+    }
+    setQuizMeta({
+      knowledge_id: point.knowledge_id,
+      knowledge_name: point.knowledge_name,
+      knowledge_category: point.knowledge_category ?? [],
+      questions: [],
+    });
+    void fetchWeakQuiz(point);
+  };
+
+  const updateQuizAnswer = (idx: number, value: string) => {
+    setQuizAnswers((prev) => {
+      const next = [...prev];
+      next[idx] = value;
+      return next;
+    });
+  };
+
+  const handleSubmitQuiz = () => {
+    setQuizSubmitted(true);
+    const checks = quizQuestions.map<QuizCheckState>((q, idx) => {
+      const ans = (quizAnswers[idx] || '').trim();
+      if (q.question_type.includes('简')) return 'skip';
+      if (q.question_type.includes('选')) {
+        const ref = (q.reference_answer || '').trim();
+        if (!ref) return 'wrong';
+        const refLetter = (ref[0] || '').toUpperCase();
+        return ans.toUpperCase() === refLetter.toUpperCase() ? 'correct' : 'wrong';
+      }
+      if (q.question_type.includes('填')) {
+        const refParts = splitAnswers(q.reference_answer || '');
+        const userParts = splitAnswers(ans);
+        if (refParts.length === 0 || userParts.length === 0) return 'wrong';
+        if (refParts.length !== userParts.length) return 'wrong';
+        const allMatch = refParts.every((part, i) => part === (userParts[i] || ''));
+        return allMatch ? 'correct' : 'wrong';
+      }
+      return 'skip';
+    });
+
+    setQuizChecks(checks);
+
+    if (quizMeta?.knowledge_id) {
+      setQuizCache((prev) => {
+        const existing = prev[quizMeta.knowledge_id];
+        if (!existing) return prev;
+        return {
+          ...prev,
+          [quizMeta.knowledge_id]: {
+            ...existing,
+            used: true,
+            updatedAt: new Date().toISOString(),
+          },
+        };
+      });
+      if (activeWeakPoint) {
+        void ensureQuizCacheForPoint(activeWeakPoint, { forceRefresh: true });
+      }
+    }
+
+    void submitQuizReview(checks);
   };
 
   return (
+    <>
     <TooltipProvider delayDuration={120} skipDelayDuration={120}>
-      <div className="relative flex h-full min-h-0 overflow-hidden">
+    <div className="relative flex h-full min-h-0 overflow-hidden">
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_14%_2%,rgba(59,130,246,0.14),transparent_30%),radial-gradient(circle_at_88%_8%,rgba(14,116,144,0.15),transparent_32%)]" />
 
         <div className="relative flex min-h-0 min-w-0 flex-1">
@@ -553,26 +1059,6 @@ export default function ChatPage() {
 
             <ScrollArea className="relative min-h-0 flex-1 px-5 py-6 lg:px-6" viewportRef={scrollRef}>
               <div className="mx-auto max-w-3xl space-y-5 pb-10">
-                {lastQuestion && (
-                  <Card className="motion-fade-up border-dashed border-border/75 bg-muted/35 py-4">
-                    <CardHeader className="pb-2">
-                      <CardTitle className="flex items-center gap-2 text-sm">
-                        <ClientIcon icon={RotateCcw} className="h-4 w-4" />
-                        上次问题回顾
-                      </CardTitle>
-                      <CardDescription>
-                        上次记录于 {new Date(lastQuestion.askedAt).toLocaleString()}
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent className="flex flex-col gap-3">
-                      <p className="text-sm">{lastQuestion.title}</p>
-                      <Button size="sm" variant="outline" onClick={handleReviewLast} className="self-start">
-                        继续温习
-                      </Button>
-                    </CardContent>
-                  </Card>
-                )}
-
                 {messages.map((message, index) => (
                   <div
                     key={message.id}
@@ -599,11 +1085,7 @@ export default function ChatPage() {
                       </div>
                       {message.cards && message.cards.length > 0 && !message.streaming && (
                         <div className="mt-3">
-                          <KnowledgeGraph
-                            items={message.cards}
-                            centerLabel=""
-                            onFollowUp={handleFollowUp}
-                          />
+                          <KnowledgeGraph items={message.cards} onFollowUp={handleFollowUp} />
                         </div>
                       )}
                       <p
@@ -674,7 +1156,16 @@ export default function ChatPage() {
                     return (
                       <Card
                         key={item.knowledge_id}
-                        className={`border ${accent.includes('amber') ? 'animate-pulse-slow' : ''} border-border/70 bg-gradient-to-br ${accent}`}
+                        className={`group border ${accent.includes('amber') ? 'animate-pulse-slow' : ''} border-border/70 bg-gradient-to-br ${accent} cursor-pointer transition hover:translate-y-[-2px] hover:border-sky-300/70`}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => openQuizForWeakPoint(item)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            openQuizForWeakPoint(item);
+                          }
+                        }}
                       >
                         <CardHeader className="pb-2">
                           <CardTitle className="text-sm flex items-center justify-between gap-2">
@@ -709,62 +1200,235 @@ export default function ChatPage() {
           </aside>
         </div>
       </div>
-    </TooltipProvider>
-  );
+      </TooltipProvider>
+
+      <Dialog open={quizOpen} onOpenChange={setQuizOpen}>
+        <DialogContent className="w-[96vw] max-w-6xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-lg">
+              <span>薄弱点练习</span>
+              {quizMeta?.knowledge_name && (
+                <span className="rounded-full border border-border/60 bg-muted/60 px-2 py-1 text-xs text-muted-foreground">
+                  {quizMeta.knowledge_name}
+                </span>
+              )}
+            </DialogTitle>
+            <DialogDescription className="text-sm text-muted-foreground">
+              根据薄弱点生成的小练习，提交后会记录你的作答（当前仅本地显示）。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-5 max-h-[74vh] grid-cols-1 md:grid-cols-[3.1fr_1.2fr]">
+            <div className="space-y-4 overflow-y-auto pr-2 md:pr-5">
+              {quizLoading && (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>题目生成中...</span>
+                </div>
+              )}
+
+              {quizError && (
+                <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  {quizError}
+                </div>
+              )}
+
+              {!quizLoading && !quizError && quizQuestions.length === 0 && (
+                <p className="text-sm text-muted-foreground">暂无题目，请稍后重试。</p>
+              )}
+
+              {quizQuestions.map((q, idx) => {
+                const answer = quizAnswers[idx] ?? '';
+                const isChoice = q.question_type.includes('选');
+                const isBlank = q.question_type.includes('填');
+                const isEssay = q.question_type.includes('简');
+                const checkState = quizChecks[idx];
+                const badgeColor = checkState === 'correct' ? 'bg-emerald-500/15 text-emerald-200 border-emerald-400/60' : checkState === 'wrong' ? 'bg-red-500/15 text-red-200 border-red-400/60' : 'bg-muted/60 text-muted-foreground border-border/60';
+                const badgeText = checkState === 'correct' ? '正确' : checkState === 'wrong' ? '错误' : '待判定';
+                return (
+                  <div key={`quiz-${idx}`} className={`rounded-xl border border-border/60 bg-card/80 p-4 shadow-sm ${checkState === 'correct' ? 'ring-1 ring-emerald-400/60' : checkState === 'wrong' ? 'ring-1 ring-red-400/60' : ''}`}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <span className="rounded-full border border-border/60 bg-muted/60 px-2 py-0.5">
+                            {q.question_type || '题目'}
+                          </span>
+                          {quizMeta?.knowledge_category?.length ? (
+                            <span className="rounded-full border border-border/60 bg-muted/60 px-2 py-0.5">
+                              {quizMeta.knowledge_category.join(' / ')}
+                            </span>
+                          ) : null}
+                          <span className={`rounded-full border px-2 py-0.5 ${badgeColor}`}>{badgeText}</span>
+                        </div>
+                        <p className="text-sm font-medium leading-relaxed text-foreground">{q.question_stem}</p>
+                      </div>
+                      {quizSubmitted && !isEssay && (q.reference_answer || q.answer_analysis) && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button size="sm" variant="ghost" className="h-8 text-xs" aria-label="查看解析">
+                              解析
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent side="left" className="max-w-xs space-y-2 text-xs leading-relaxed">
+                            {q.reference_answer && <p className="font-semibold">参考答案：{q.reference_answer}</p>}
+                            {q.answer_analysis && <p className="text-muted-foreground">{q.answer_analysis}</p>}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
+                    </div>
+
+                    <div className="mt-3 space-y-2">
+                      {isChoice && q.options?.length > 0 && (
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {q.options.map((opt, optIdx) => {
+                            const display = stripOptionLabel(opt);
+                            const value = String.fromCharCode(65 + optIdx);
+                            const checked = answer === value;
+                            return (
+                              <label
+                                key={`opt-${idx}-${optIdx}`}
+                                className={`flex cursor-pointer items-start gap-2 rounded-lg border px-3 py-2 text-sm transition ${
+                                  checked ? 'border-sky-400/70 bg-sky-500/10' : 'border-border/60 hover:border-sky-300/70'
+                                }`}
+                              >
+                                <input
+                                  type="radio"
+                                  name={`quiz-${idx}`}
+                                  className="mt-1"
+                                  value={value}
+                                  checked={checked}
+                                  onChange={() => updateQuizAnswer(idx, value)}
+                                />
+                                <span className="leading-relaxed">
+                                  <span className="mr-2 font-semibold text-xs text-muted-foreground">{value}</span>
+                                  {display}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {isBlank && (
+                        <div className="space-y-2">
+                          <p className="text-xs text-muted-foreground">{`填空数量：${q.blank_count || 1}`}</p>
+                          <Input
+                            value={answer}
+                            onChange={(e) => updateQuizAnswer(idx, e.target.value)}
+                            placeholder="请输入答案（多个用；分隔）"
+                            className="bg-background/80"
+                          />
+                        </div>
+                      )}
+
+                      {isEssay && (
+                        <Textarea
+                          value={answer}
+                          onChange={(e) => updateQuizAnswer(idx, e.target.value)}
+                          placeholder="请输入你的作答"
+                          className="min-h-[120px] bg-background/80"
+                        />
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="overflow-y-auto rounded-xl border border-border/60 bg-card/80 p-5 shadow-sm md:pl-4">
+              <div className="flex items-center justify-between">
+                <h4 className="text-sm font-semibold">答案解析</h4>
+                {quizReviewLoading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+              </div>
+              {quizReviewError && (
+                <p className="mt-2 text-sm text-destructive">{quizReviewError}</p>
+              )}
+              {!quizReview && !quizReviewLoading && !quizReviewError && (
+                <p className="mt-2 text-sm text-muted-foreground">提交后展示参考答案、评价与改进建议。</p>
+              )}
+              {quizReview && (
+                <div className="mt-3 space-y-2 text-sm leading-relaxed text-foreground">
+                  {quizReview.split(/\n+/).map((line, idx) => (
+                    <p key={`review-${idx}`}>{line}</p>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter className="flex items-center justify-between">
+            <div className="text-xs text-muted-foreground">
+              {quizSubmitted ? '已提交（当前仅本地记录，后续将用于评估）。' : '完成所有题目后提交，本地记录你的作答。'}
+            </div>
+            <Button onClick={handleSubmitQuiz} disabled={quizLoading || quizQuestions.length === 0 || quizSubmitted || quizReviewLoading}>
+              {quizSubmitted ? '已提交' : '提交作答'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      </>
+    );
 }
 
-function KnowledgeGraph({
-  items,
-  centerLabel,
-  onFollowUp,
-}: {
-  items: AssistantCardItem[];
-  centerLabel: string;
-  onFollowUp: (question: string) => void;
-}) {
-  const nodes = useMemo(() => {
-    if (!items || items.length === 0) return [] as Array<AssistantCardItem & { x: number; y: number; angle: number }>;
-    const radius = 36;
-    const count = items.length;
-    return items.map((item, idx) => {
-      const angle = (2 * Math.PI * idx) / Math.max(count, 1);
-      return {
-        ...item,
-        angle,
-        x: 50 + radius * Math.cos(angle),
-        y: 50 + radius * Math.sin(angle),
-      };
+function KnowledgeGraph({ items, onFollowUp }: { items: AssistantCardItem[]; onFollowUp: (question: string) => void }) {
+  const graph = useMemo(() => {
+    const grouped = new Map<string, AssistantCardItem[]>();
+    (items || []).forEach((item) => {
+      const key = item.source?.trim() || '知识点';
+      grouped.set(key, [...(grouped.get(key) || []), item]);
     });
+
+    const centers = Array.from(grouped.entries()).map(([label, groupItems], idx, arr) => {
+      const centerRing = 30;
+      const angleBase = (2 * Math.PI * idx) / Math.max(arr.length, 1);
+      const angle = angleBase + idx * 0.08; // light stagger for interleave
+      const cx = 50 + centerRing * Math.cos(angle);
+      const cy = 50 + centerRing * Math.sin(angle);
+      const nodeRing = 22;
+      const nodes = groupItems.map((item, nodeIdx) => {
+        const nodeAngle = (2 * Math.PI * nodeIdx) / Math.max(groupItems.length, 1) + angleBase * 0.12;
+        return {
+          ...item,
+          cx,
+          cy,
+          angle: nodeAngle,
+          x: cx + nodeRing * Math.cos(nodeAngle),
+          y: cy + nodeRing * Math.sin(nodeAngle),
+        };
+      });
+
+      return { label, cx, cy, nodes };
+    });
+
+    const edges = centers.flatMap((center) =>
+      center.nodes.map((node) => {
+        const midX = (center.cx + node.x) / 2;
+        const midY = (center.cy + node.y) / 2;
+        const angleDeg = (node.angle * 180) / Math.PI;
+        const readableAngle = angleDeg > 90 || angleDeg < -90 ? angleDeg + 180 : angleDeg;
+        return {
+          fromX: center.cx,
+          fromY: center.cy,
+          toX: node.x,
+          toY: node.y,
+          midX,
+          midY,
+          readableAngle,
+          relationship: node.relationship,
+        };
+      })
+    );
+
+    return { centers, edges };
   }, [items]);
 
-  // 计算所有节点的边，确保每个节点都有连线
-  const edges = useMemo(() => {
-    if (nodes.length === 0) return [];
-    return nodes.map((node) => {
-      const midX = (50 + node.x) / 2;
-      const midY = (50 + node.y) / 2;
-      const angleDeg = (node.angle * 180) / Math.PI;
-      const readableAngle = angleDeg > 90 || angleDeg < -90 ? angleDeg + 180 : angleDeg;
-      
-      return {
-        fromX: 50,
-        fromY: 50,
-        toX: node.x,
-        toY: node.y,
-        midX,
-        midY,
-        readableAngle,
-        relationship: node.relationship
-      };
-    });
-  }, [nodes]);
+  if (!graph.centers.length) return null;
 
   return (
-    <div className="rounded-2xl border border-border/60 bg-gradient-to-br from-sky-950/35 via-slate-900/50 to-emerald-900/35 p-4 text-foreground shadow-[0_20px_40px_-30px_rgba(0,0,0,0.7)]">
+    <div className="mx-auto w-full max-w-[520px] rounded-2xl border border-border/60 bg-gradient-to-br from-sky-950/35 via-slate-900/50 to-emerald-900/35 p-4 text-foreground shadow-[0_20px_40px_-30px_rgba(0,0,0,0.7)]">
       <div className="relative aspect-square w-full min-h-[260px]">
         <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet">
-          {/* 绘制所有边 */}
-          {edges.map((edge, idx) => (
+          {graph.edges.map((edge, idx) => (
             <g key={`edge-${idx}`} className="text-xs" opacity={0.9}>
               <line
                 x1={edge.fromX}
@@ -772,7 +1436,8 @@ function KnowledgeGraph({
                 x2={edge.toX}
                 y2={edge.toY}
                 stroke="url(#edgeGradient)"
-                strokeWidth={1.4}
+                strokeWidth={1.5}
+                strokeOpacity={0.85}
                 strokeLinecap="round"
               />
               {edge.relationship && (
@@ -782,7 +1447,7 @@ function KnowledgeGraph({
                   fill="hsl(var(--muted-foreground))"
                   textAnchor="middle"
                   dominantBaseline="central"
-                  fontSize="2.6"
+                  fontSize="1.6"
                   transform={`rotate(${edge.readableAngle}, ${edge.midX}, ${edge.midY})`}
                 >
                   {edge.relationship}
@@ -790,50 +1455,56 @@ function KnowledgeGraph({
               )}
             </g>
           ))}
-          
+
           <defs>
             <linearGradient id="edgeGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="rgba(59,130,246,0.65)" />
-              <stop offset="100%" stopColor="rgba(16,185,129,0.65)" />
+              <stop offset="0%" stopColor="rgba(59,130,246,0.82)" />
+              <stop offset="100%" stopColor="rgba(16,185,129,0.74)" />
             </linearGradient>
           </defs>
         </svg>
 
-        {/* 中心节点 */}
-        <div className="absolute left-1/2 top-1/2 flex h-14 w-14 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-sky-300/55 bg-gradient-to-br from-slate-800/80 to-slate-900/90 text-center text-xs font-semibold text-white/70 shadow-lg">
-          <span className="px-2 leading-snug">{centerLabel}</span>
-        </div>
-
-        {/* 外围节点 */}
-        {nodes.map((node, idx) => (
-          <Tooltip key={`node-${idx}`}>
-            <TooltipTrigger asChild>
-              <button
-                className="absolute flex h-16 w-16 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-border/70 bg-background/80 text-center text-xs font-medium text-foreground shadow-md transition hover:scale-105 hover:border-sky-300/70 hover:bg-background/95"
-                style={{ left: `${node.x}%`, top: `${node.y}%` }}
-              >
-                <span className="px-2 leading-tight">{node.title || '知识点'}</span>
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="top" className="max-w-xs space-y-2 border-border/70 bg-card/95 text-foreground">
-              <div className="text-sm font-semibold">{node.title || '知识点'}</div>
-              {node.description && <p className="text-xs text-muted-foreground leading-relaxed">{node.description}</p>}
-              {node.question && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-8 text-xs"
-                  onClick={() => {
-                    const q = node.question;
-                    if (q) onFollowUp(q);
-                  }}
-                >
-                  {node.question}
-                </Button>
-              )}
-            </TooltipContent>
-          </Tooltip>
+        {graph.centers.map((center, idx) => (
+          <div
+            key={`center-${idx}`}
+            className="absolute flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-sky-300/65 bg-gradient-to-br from-slate-800/85 to-slate-900/90 text-center text-[10px] font-semibold text-white/80 shadow-lg"
+            style={{ left: `${center.cx}%`, top: `${center.cy}%` }}
+          >
+            <span className="px-2 leading-snug">{center.label}</span>
+          </div>
         ))}
+
+        {graph.centers.flatMap((center, centerIdx) =>
+          center.nodes.map((node, idx) => (
+            <Tooltip key={`node-${centerIdx}-${idx}`}>
+              <TooltipTrigger asChild>
+                <button
+                  className="absolute flex h-12 w-12 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-border/70 bg-background/82 text-center text-[10px] font-medium text-foreground shadow-md transition hover:scale-105 hover:border-sky-300/70 hover:bg-background/95"
+                  style={{ left: `${node.x}%`, top: `${node.y}%` }}
+                >
+                  <span className="px-2 leading-tight">{node.title || '知识点'}</span>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="max-w-xs space-y-2 border-border/70 bg-card/95 text-foreground">
+                <div className="text-sm font-semibold">{node.title || '知识点'}</div>
+                {node.description && <p className="text-xs text-muted-foreground leading-relaxed">{node.description}</p>}
+                {node.question && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs"
+                    onClick={() => {
+                      const q = node.question;
+                      if (q) onFollowUp(q);
+                    }}
+                  >
+                    {node.question}
+                  </Button>
+                )}
+              </TooltipContent>
+            </Tooltip>
+          ))
+        )}
       </div>
     </div>
   );
