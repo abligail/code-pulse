@@ -11,7 +11,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Skeleton } from '@/components/ui/skeleton';
 import { PageHeader, PageHeaderDescription, PageHeaderHeading, PageHeaderTitle } from '@/components/ui/page-header';
 import { PageState } from '@/components/ui/page-state';
-import { requestReview, runCode, type ReviewResult, type RunResult } from '@/lib/api/review';
+import { requestReview, runCode, type ReviewMode, type ReviewResult, type RunResult } from '@/lib/api/review';
 import { logUserEvent } from '@/lib/api/events';
 
 const exampleCode = `#include <stdio.h>
@@ -30,6 +30,12 @@ int main() {
     return 0;
 }`;
 
+const createRoundId = () => {
+  const timePart = Date.now().toString(36);
+  const randPart = Math.random().toString(36).slice(2, 8);
+  return `rr_${timePart}_${randPart}`;
+};
+
 export default function ReviewPage() {
   const [code, setCode] = useState(exampleCode);
   const [input, setInput] = useState('');
@@ -40,6 +46,7 @@ export default function ReviewPage() {
   const [isReviewing, setIsReviewing] = useState({ syntax: false, style: false, logic: false });
 
   const handleRunCode = async () => {
+    const roundId = createRoundId();
     setIsRunning(true);
     setRunResult(null);
     setReviews({});
@@ -51,16 +58,20 @@ export default function ReviewPage() {
       void logUserEvent({
         eventType: 'review_run',
         source: 'student/review',
+        roundId,
         metrics: {
           success: data.success,
           errorType: data.errorType,
           exitCode: data.exitCode ?? data.data?.exitCode,
+          compileTime: data.data?.compileTime,
+          runTime: data.data?.runTime,
+          totalTime: data.data?.totalTime,
         },
       });
 
       // Trigger parallel reviews
       if (data.success) {
-        triggerReviews(data);
+        triggerReviews(data, roundId);
       }
     } catch (error) {
       console.error('Failed to run code:', error);
@@ -75,8 +86,8 @@ export default function ReviewPage() {
     }
   };
 
-  const triggerReviews = async (runData: RunResult) => {
-    const modes = ['syntax', 'style', 'logic'] as const;
+  const triggerReviews = async (runData: RunResult, roundId: string) => {
+    const modes: ReviewMode[] = ['syntax', 'style', 'logic'];
 
     modes.forEach(mode => {
       setIsReviewing(prev => ({ ...prev, [mode]: true }));
@@ -85,6 +96,7 @@ export default function ReviewPage() {
         code,
         mode,
         runResult: runData,
+        roundId,
       })
         .then(data => {
           setReviews(prev => ({ ...prev, [mode]: data }));
@@ -118,7 +130,7 @@ export default function ReviewPage() {
     setCode(exampleCode);
   };
 
-  const reviewModes: Array<'syntax' | 'style' | 'logic'> = ['syntax', 'style', 'logic'];
+  const reviewModes: ReviewMode[] = ['syntax', 'style', 'logic'];
 
   return (
     <div className="relative flex h-[calc(100vh-73px)] flex-col overflow-hidden">

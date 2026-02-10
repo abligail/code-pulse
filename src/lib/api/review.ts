@@ -1,5 +1,7 @@
 import { apiPost } from '@/lib/api/client';
 
+export type ReviewMode = 'syntax' | 'style' | 'logic';
+
 export interface RunResult {
   success: boolean;
   data?: {
@@ -29,5 +31,5 @@ export interface ReviewResult {
 export const runCode = (payload: { code: string; input?: string }) =>
   apiPost<RunResult>('/api/run-c', payload);
 
-export const requestReview = (payload: { code: string; mode: 'syntax' | 'style' | 'logic'; runResult: RunResult }) =>
+export const requestReview = (payload: { code: string; mode: ReviewMode; runResult: RunResult; roundId?: string }) =>
   apiPost<ReviewResult>('/api/review', payload);
