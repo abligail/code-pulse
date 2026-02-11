@@ -200,31 +200,20 @@ const appendWeakKnowledge = async (
   metadata: { mode: ReviewMode; roundId?: string; reviewSummary: string; runResult?: RunResult }
 ) => {
   const url = `${PROFILE_API_BASE.replace(/\/+$/, '')}/api/mongodb/user_profile`;
+  const profilePayload = {
+    user_id: userId,
+    weak_knowledge: [weakPoint],
+    source: 'review',
+    mode: metadata.mode,
+    round_id: metadata.roundId ?? null,
+    review_summary: metadata.reviewSummary,
+    run_success: metadata.runResult?.success ?? null,
+  };
   const payload = {
     user_id: userId,
-    profile_json_str: JSON.stringify({
-      weak_knowledge: [weakPoint],
-      source: 'review',
-      mode: metadata.mode,
-      round_id: metadata.roundId ?? null,
-      review_summary: metadata.reviewSummary,
-      run_success: metadata.runResult?.success ?? null,
-    }),
+    profile_json_str: JSON.stringify(profilePayload),
   };
-  const fallback = {
-    user_id: userId,
-    user_name: userId,
-    profile_json_str: JSON.stringify({
-      user_id: userId,
-      weak_knowledge: [weakPoint],
-      source: 'review',
-      mode: metadata.mode,
-      round_id: metadata.roundId ?? null,
-      review_summary: metadata.reviewSummary,
-      run_success: metadata.runResult?.success ?? null,
-    }),
-  };
-  await requestWithFallback('POST', url, [payload, fallback]);
+  await requestWithFallback('POST', url, [payload]);
 };
 
 const updateWeakKnowledge = async (
@@ -235,35 +224,22 @@ const updateWeakKnowledge = async (
   const url = `${PROFILE_API_BASE.replace(/\/+$/, '')}/api/mongodb/user_profile/${encodeURIComponent(
     userId
   )}/weak/${encodeURIComponent(weakPoint.knowledge_id)}`;
+  const reviewRecord = {
+    source: 'review',
+    mode: metadata.mode,
+    round_id: metadata.roundId ?? null,
+    review_summary: metadata.reviewSummary,
+    run_success: metadata.runResult?.success ?? null,
+    error_type: metadata.runResult?.errorType ?? null,
+  };
   const payload = {
     profile_update_str: JSON.stringify({
-      weak_knowledge: weakPoint,
-      reset_review_time: true,
-      source: 'review',
-      mode: metadata.mode,
-      round_id: metadata.roundId ?? null,
-      review_summary: metadata.reviewSummary,
-      run_success: metadata.runResult?.success ?? null,
-    }),
-  };
-  const fallback = {
-    profile_update_str: JSON.stringify({
-      knowledge_name: weakPoint.knowledge_name,
-      knowledge_category: weakPoint.knowledge_category,
-      weak_reason: weakPoint.weak_reason,
       weak_score: weakPoint.weak_score,
-      first_weak_time: weakPoint.first_weak_time,
-      last_review_time: weakPoint.last_review_time,
-      review_count: weakPoint.review_count,
-      reset_review_time: true,
-      source: 'review',
-      mode: metadata.mode,
-      round_id: metadata.roundId ?? null,
-      review_summary: metadata.reviewSummary,
-      run_success: metadata.runResult?.success ?? null,
+      weak_reason: weakPoint.weak_reason,
+      review_record: reviewRecord,
     }),
   };
-  await requestWithFallback('PUT', url, [payload, fallback]);
+  await requestWithFallback('PUT', url, [payload]);
 };
 
 const normalizeCandidate = (candidate: WeakKnowledgeCandidate, now: string): WeakKnowledgePoint => ({
@@ -375,4 +351,3 @@ export const syncWeakKnowledge = async ({
 
   return result;
 };
-
