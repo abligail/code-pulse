@@ -8,6 +8,13 @@ export const dynamic = 'force-dynamic';
 const MAX_CODE_LENGTH = 40_000;
 const MAX_INPUT_LENGTH = 8_192;
 
+const buildValidationFailure = (summary: string): RunResult => ({
+  success: false,
+  errorType: '参数错误',
+  errorSummary: summary,
+  error: summary,
+});
+
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as { code?: unknown; input?: unknown };
@@ -15,24 +22,15 @@ export async function POST(request: NextRequest) {
     const input = typeof body.input === 'string' ? body.input : undefined;
 
     if (!code.trim()) {
-      return NextResponse.json(
-        { error: 'code is required' },
-        { status: 400 }
-      );
+      return NextResponse.json(buildValidationFailure('代码不能为空，请先输入 C 代码。'));
     }
 
     if (code.length > MAX_CODE_LENGTH) {
-      return NextResponse.json(
-        { error: `code is too long, max length is ${MAX_CODE_LENGTH}` },
-        { status: 400 }
-      );
+      return NextResponse.json(buildValidationFailure(`代码长度超过限制（最多 ${MAX_CODE_LENGTH} 字符）。`));
     }
 
     if (input && input.length > MAX_INPUT_LENGTH) {
-      return NextResponse.json(
-        { error: `input is too long, max length is ${MAX_INPUT_LENGTH}` },
-        { status: 400 }
-      );
+      return NextResponse.json(buildValidationFailure(`输入长度超过限制（最多 ${MAX_INPUT_LENGTH} 字符）。`));
     }
 
     const response = await runCCode({ code, input });

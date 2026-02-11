@@ -28,8 +28,24 @@ export interface ReviewResult {
   questions: string[];
 }
 
+export interface ReviewBranchMetrics {
+  issueCount: number;
+  highestSeverity: number;
+  mode: ReviewMode;
+  weakCandidateCount: number;
+  syncAdded: number;
+  syncUpdated: number;
+  syncSkipped: number;
+  syncErrors: number;
+}
+
+export interface ReviewBranchResponse {
+  review: ReviewResult;
+  metrics: ReviewBranchMetrics;
+}
+
 export const runCode = (payload: { code: string; input?: string }) =>
   apiPost<RunResult>('/api/run-c', payload);
 
 export const requestReview = (payload: { code: string; mode: ReviewMode; runResult: RunResult; roundId?: string }) =>
-  apiPost<ReviewResult>('/api/review', payload);
+  apiPost<ReviewBranchResponse>('/api/review', payload);

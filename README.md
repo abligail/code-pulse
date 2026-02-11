@@ -26,22 +26,30 @@ pnpm install
 
 本地开发（跨平台推荐）：
 ```bash
-pnpm exec next dev -p 5000
+pnpm exec next dev -p 5002
 ```
-浏览器访问 `http://localhost:5000`。
+浏览器访问 `http://localhost:5002`。
 
 构建与生产预览（跨平台推荐）：
 ```bash
 pnpm exec next build
-pnpm exec next start -p 5000
+pnpm exec next start -p 5002
 ```
+
+联调（需要画像服务）：
+```bash
+cd graph-rag-prog-mind-finish/app
+python app.py
+```
+画像服务默认地址 `http://127.0.0.1:5000`，请与 Next 服务使用不同端口（上方示例为 `5002`）。
 
 使用脚本（可选）：
 - `pnpm run dev/build/start` 会调用 `scripts/*.sh`，需要 Bash 环境（macOS/Linux/WSL/Git Bash）。
 
 ## Demo 数据说明（重要）
 
-- 当前所有 `/api/*` 接口均为 mock（`src/app/api/*` + `src/lib/mock-data.ts`），用于演示完整流程。
+- 大部分 `/api/*` 接口仍为 mock（`src/app/api/*` + `src/lib/mock-data.ts`），用于演示完整流程。
+- 代码评审页相关接口 `/api/run-c` 与 `/api/review` 已接入真实服务逻辑（`src/server/review/*`）。
 - 学习足迹 `/api/profile/events` 使用内存数组临时存储（重启服务会清空）。
 - 账号信息保存在浏览器本地；清除缓存会导致账号与历史数据丢失。
 
@@ -52,7 +60,7 @@ src/
 ├── app/                # Next.js App Router（页面 + API 路由）
 │   ├── student/        # 学生端：问答/评审/练习/报告
 │   ├── teacher/        # 教师端：看板/教学要求
-│   └── api/            # Mock API（chat/review/run-c/practice/profile/teacher/graph）
+│   └── api/            # API 路由（多数 mock；review/run-c 已真实化）
 ├── components/         # 业务组件
 │   └── ui/             # shadcn/ui 基础组件
 ├── lib/
