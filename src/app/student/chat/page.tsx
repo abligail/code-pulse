@@ -1480,22 +1480,35 @@ function KnowledgeGraph({ items, onFollowUp }: { items: AssistantCardItem[]; onF
       grouped.set(key, [...(grouped.get(key) || []), item]);
     });
 
+    const phyllotaxisPosition = (index: number, total: number) => {
+      if (total <= 1) {
+        return { cx: 50, cy: 50 };
+      }
+      const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+      const radiusScale = 34;
+      const normalizedIndex = (index + 0.5) / total;
+      const radius = 8 + radiusScale * Math.sqrt(normalizedIndex);
+      const angle = index * goldenAngle;
+      const cx = 50 + radius * Math.cos(angle);
+      const cy = 50 + radius * Math.sin(angle);
+      const clamp = (value: number) => Math.min(88, Math.max(12, value));
+      return { cx: clamp(cx), cy: clamp(cy) };
+    };
+
     const centers = Array.from(grouped.entries()).map(([label, groupItems], idx, arr) => {
-      const centerRing = 30;
-      const angleBase = (2 * Math.PI * idx) / Math.max(arr.length, 1);
-      const angle = angleBase + idx * 0.08; // light stagger for interleave
-      const cx = 50 + centerRing * Math.cos(angle);
-      const cy = 50 + centerRing * Math.sin(angle);
-      const nodeRing = 22;
+      const { cx, cy } = phyllotaxisPosition(idx, Math.max(arr.length, 1));
+      const nodeRingBase = 14 + Math.max(0, 10 - groupItems.length);
       const nodes = groupItems.map((item, nodeIdx) => {
-        const nodeAngle = (2 * Math.PI * nodeIdx) / Math.max(groupItems.length, 1) + angleBase * 0.12;
+        const offset = (2 * Math.PI * nodeIdx) / Math.max(groupItems.length, 1);
+        const nodeAngle = offset + nodeIdx * 0.07;
+        const ring = nodeRingBase + (nodeIdx % 2) * 3;
         return {
           ...item,
           cx,
           cy,
           angle: nodeAngle,
-          x: cx + nodeRing * Math.cos(nodeAngle),
-          y: cy + nodeRing * Math.sin(nodeAngle),
+          x: cx + ring * Math.cos(nodeAngle),
+          y: cy + ring * Math.sin(nodeAngle),
         };
       });
 
