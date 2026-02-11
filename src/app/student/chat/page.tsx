@@ -15,6 +15,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { getActiveUser, setLastQuestion } from '@/lib/auth/session';
+import { appendQuizHistoryEntry, type QuizHistoryEntry, type QuizHistoryCheckState } from '@/lib/storage/quiz-history';
 
 interface ChatMessage {
   id: string;
@@ -90,7 +91,7 @@ interface QuizCacheEntry {
   updatedAt: string;
 }
 
-type QuizCheckState = 'correct' | 'wrong' | 'skip';
+type QuizCheckState = QuizHistoryCheckState;
 
 const EBBINGHAUS_INTERVALS = [0.5, 1, 2, 4, 7, 15, 30];
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
@@ -692,6 +693,40 @@ export default function ChatPage() {
     }
   };
 
+  const recordQuizHistory = useCallback(
+    (reviewText: string, checks: QuizCheckState[]) => {
+      if (!quizMeta || !reviewText.trim() || quizQuestions.length === 0) return;
+      const now = Date.now();
+      const timestamp = new Date(now).toISOString();
+      const rawId = (quizMeta.knowledge_id || activeWeakPoint?.knowledge_id || '').trim();
+      const knowledgeId = rawId || `quiz-${now}`;
+      const knowledgeName = quizMeta.knowledge_name || activeWeakPoint?.knowledge_name || '未命名知识点';
+      const categorySource = quizMeta.knowledge_category?.length ? quizMeta.knowledge_category : activeWeakPoint?.knowledge_category;
+      const knowledgeCategory = Array.isArray(categorySource)
+        ? categorySource.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        : [];
+      const entry: QuizHistoryEntry = {
+        id: `${knowledgeId}-${now}`,
+        knowledgeId,
+        knowledgeName,
+        knowledgeCategory,
+        occurredAt: timestamp,
+        review: reviewText,
+        questions: quizQuestions.map((question, idx) => ({
+          stem: question.question_stem,
+          type: question.question_type,
+          options: question.options ?? [],
+          userAnswer: quizAnswers[idx] ?? '',
+          referenceAnswer: question.reference_answer || undefined,
+          analysis: question.answer_analysis || undefined,
+          checkResult: checks[idx] ?? 'skip',
+        })),
+      };
+      appendQuizHistoryEntry(entry);
+    },
+    [quizMeta, quizQuestions, quizAnswers, activeWeakPoint]
+  );
+
   const submitQuizReview = useCallback(
     async (checks: QuizCheckState[]) => {
       if (!quizMeta || quizQuestions.length === 0) return;
@@ -808,6 +843,7 @@ export default function ChatPage() {
         }
 
         setQuizReview(reviewText);
+        recordQuizHistory(reviewText, checks);
 
         const weakScoreFromReview = extractWeakScoreFromMessage(reviewText);
         if (weakScoreFromReview !== null && weakScoreFromReview <= 0 && quizMeta.knowledge_id) {
@@ -820,7 +856,7 @@ export default function ChatPage() {
         setQuizReviewLoading(false);
       }
     },
-    [quizMeta, quizQuestions, quizAnswers, deleteWeakKnowledgePoint]
+    [quizMeta, quizQuestions, quizAnswers, deleteWeakKnowledgePoint, recordQuizHistory]
   );
 
   const handleSendMessage = async (message: string) => {
