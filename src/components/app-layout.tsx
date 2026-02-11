@@ -8,6 +8,7 @@ import {
   BookOpen,
   ClipboardList,
   Code,
+  FileText,
   LogOut,
   Menu,
   MessageSquare,
@@ -24,6 +25,7 @@ const studentNav = [
   { href: '/student/chat', label: '知识问答', icon: MessageSquare },
   { href: '/student/review', label: '代码评审', icon: Code },
   { href: '/student/practice', label: '练习评测', icon: BookOpen },
+  { href: '/student/exam', label: '考试', icon: FileText },
   { href: '/student/report', label: '学习报告', icon: BarChart3 },
 ];
 
