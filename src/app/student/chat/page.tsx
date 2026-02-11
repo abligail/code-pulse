@@ -92,6 +92,62 @@ interface QuizCacheEntry {
 
 type QuizCheckState = 'correct' | 'wrong' | 'skip';
 
+const EBBINGHAUS_INTERVALS = [0.5, 1, 2, 4, 7, 15, 30];
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+
+const findWeakScoreRecursively = (value: unknown): number | null => {
+  if (!value) return null;
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const nested = findWeakScoreRecursively(entry);
+      if (nested !== null) return nested;
+    }
+    return null;
+  }
+  if (typeof value === 'object') {
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (key === 'weak_score') {
+        const num = typeof entry === 'number' ? entry : Number(entry);
+        if (!Number.isNaN(num)) return num;
+      }
+      const nested = findWeakScoreRecursively(entry);
+      if (nested !== null) return nested;
+    }
+  }
+  return null;
+};
+
+const extractWeakScoreFromMessage = (text: string): number | null => {
+  if (!text) return null;
+  const tryJson = (payload: string): number | null => {
+    try {
+      const parsed = JSON.parse(payload) as unknown;
+      return findWeakScoreRecursively(parsed);
+    } catch {
+      return null;
+    }
+  };
+
+  const direct = tryJson(text);
+  if (direct !== null) return direct;
+
+  const braceMatch = text.match(/\{[\s\S]*\}/g);
+  if (braceMatch) {
+    for (const chunk of braceMatch) {
+      const nested = tryJson(chunk);
+      if (nested !== null) return nested;
+    }
+  }
+
+  const regex = /weak_score\s*[:：]\s*(-?\d+(?:\.\d+)?)/i;
+  const match = text.match(regex);
+  if (match) {
+    const num = Number(match[1]);
+    if (!Number.isNaN(num)) return num;
+  }
+  return null;
+};
+
 const readInitialQuizCache = (): Record<string, QuizCacheEntry> => {
   if (typeof window === 'undefined') return {};
   try {
@@ -302,14 +358,55 @@ export default function ChatPage() {
       minute: '2-digit',
     });
 
+  const handleWeakPointRemoval = useCallback((knowledgeId: string) => {
+    setWeakPoints((prev) => prev.filter((item) => item.knowledge_id !== knowledgeId));
+    setQuizCache((prev) => {
+      if (!prev[knowledgeId]) return prev;
+      const next = { ...prev };
+      delete next[knowledgeId];
+      return next;
+    });
+    let shouldCloseQuiz = false;
+    setActiveWeakPoint((prev) => {
+      if (prev?.knowledge_id === knowledgeId) {
+        shouldCloseQuiz = true;
+        return null;
+      }
+      return prev;
+    });
+    if (shouldCloseQuiz) {
+      setQuizOpen(false);
+    }
+  }, []);
+
+  const deleteWeakKnowledgePoint = useCallback(
+    async (userId: string, knowledgeId: string) => {
+      try {
+        const res = await fetch(
+          `/api/mongodb/user_profile/${encodeURIComponent(userId)}/weak/${encodeURIComponent(knowledgeId)}`,
+          { method: 'DELETE' }
+        );
+        if (!res.ok) {
+          throw new Error(`Delete weak knowledge failed: ${res.status}`);
+        }
+        handleWeakPointRemoval(knowledgeId);
+      } catch (error) {
+        console.error('Failed to delete weak knowledge point', error);
+      }
+    },
+    [handleWeakPointRemoval]
+  );
+
   const computeNextReview = (item: WeakKnowledgePoint) => {
-    // Simple spaced intervals in days based on Ebbinghaus-style spacing
-    const intervals = [0.5, 1, 2, 4, 7, 15, 30];
-    const idx = Math.min(item.review_count ?? 0, intervals.length - 1);
-    const base = item.last_review_time || item.first_weak_time;
-    const baseDate = new Date(base);
-    const next = new Date(baseDate.getTime() + intervals[idx] * 24 * 60 * 60 * 1000);
-    const due = new Date() >= next;
+    // Loop through Ebbinghaus intervals; restarting a new cycle once one round completes
+    const reviewCount = Math.max(0, item.review_count ?? 0);
+    const cycleLength = EBBINGHAUS_INTERVALS.length;
+    const cyclePosition = cycleLength > 0 ? reviewCount % cycleLength : 0;
+    const baseTimestamp = item.last_review_time || item.first_weak_time;
+    const baseDate = baseTimestamp ? new Date(baseTimestamp) : new Date();
+    const intervalDays = EBBINGHAUS_INTERVALS[cyclePosition] ?? EBBINGHAUS_INTERVALS[EBBINGHAUS_INTERVALS.length - 1];
+    const next = new Date(baseDate.getTime() + intervalDays * DAY_IN_MS);
+    const due = Date.now() >= next.getTime();
     return { next, due };
   };
 
@@ -637,7 +734,7 @@ export default function ChatPage() {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            workflow_id: '7604502251185750026',
+            workflow_id: '7605245156946788378',
             parameters: {
               input: inputStr,
               uuid: userId,
@@ -711,6 +808,11 @@ export default function ChatPage() {
         }
 
         setQuizReview(reviewText);
+
+        const weakScoreFromReview = extractWeakScoreFromMessage(reviewText);
+        if (weakScoreFromReview !== null && weakScoreFromReview <= 0 && quizMeta.knowledge_id) {
+          await deleteWeakKnowledgePoint(userId, quizMeta.knowledge_id);
+        }
       } catch (error) {
         console.error('Quiz review failed', error);
         setQuizReviewError('解析获取失败，请稍后重试');
@@ -718,7 +820,7 @@ export default function ChatPage() {
         setQuizReviewLoading(false);
       }
     },
-    [quizMeta, quizQuestions, quizAnswers]
+    [quizMeta, quizQuestions, quizAnswers, deleteWeakKnowledgePoint]
   );
 
   const handleSendMessage = async (message: string) => {
@@ -1203,7 +1305,7 @@ export default function ChatPage() {
       </TooltipProvider>
 
       <Dialog open={quizOpen} onOpenChange={setQuizOpen}>
-        <DialogContent className="w-[96vw] max-w-6xl">
+        <DialogContent className="w-[95vw] max-w-4xl max-h-[85vh] overflow-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-lg">
               <span>薄弱点练习</span>
@@ -1218,7 +1320,7 @@ export default function ChatPage() {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="grid gap-5 max-h-[74vh] grid-cols-1 md:grid-cols-[3.1fr_1.2fr]">
+          <div className="grid gap-5 max-h-[70vh] grid-cols-1 md:grid-cols-[2.7fr_2.4fr]">
             <div className="space-y-4 overflow-y-auto pr-2 md:pr-5">
               {quizLoading && (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1335,7 +1437,7 @@ export default function ChatPage() {
               })}
             </div>
 
-            <div className="overflow-y-auto rounded-xl border border-border/60 bg-card/80 p-5 shadow-sm md:pl-4">
+            <div className="overflow-y-auto rounded-xl border border-border/60 bg-card/80 p-6 shadow-sm md:pl-6">
               <div className="flex items-center justify-between">
                 <h4 className="text-sm font-semibold">答案解析</h4>
                 {quizReviewLoading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}

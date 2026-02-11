@@ -60,7 +60,13 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border p-6 shadow-lg duration-200 outline-none sm:max-w-lg",
+          // 核心修改：放大弹窗默认宽度/最大宽度
+          // 1. 移动端：最大宽度从 calc(100%-2rem) 放宽到 95vw
+          // 2. 小屏及以上：最大宽度从 lg(640px) 改成 2xl(800px)，也可以用 3xl(900px)/4xl(1024px)
+          // 3. 增加最小宽度保证弹窗不会过小
+          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid w-full min-w-[300px] max-w-[95vw] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border p-6 shadow-lg duration-200 outline-none sm:max-w-2xl",
+          // 可选：如果需要更大，把 sm:max-w-2xl 改成 sm:max-w-3xl / sm:max-w-4xl
+          // sm:max-w-3xl (900px) / sm:max-w-4xl (1024px)
           className
         )}
         {...props}
