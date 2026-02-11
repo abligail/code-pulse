@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Play, Trash2, Save, Loader2, AlertTriangle, CheckCircle2, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -11,7 +11,14 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Skeleton } from '@/components/ui/skeleton';
 import { PageHeader, PageHeaderDescription, PageHeaderHeading, PageHeaderTitle } from '@/components/ui/page-header';
 import { PageState } from '@/components/ui/page-state';
-import { requestReview, runCode, type ReviewResult, type RunResult } from '@/lib/api/review';
+import {
+  requestReview,
+  runCode,
+  type ReviewBranchResponse,
+  type ReviewMode,
+  type ReviewResult,
+  type RunResult,
+} from '@/lib/api/review';
 import { logUserEvent } from '@/lib/api/events';
 
 const exampleCode = `#include <stdio.h>
@@ -30,85 +37,170 @@ int main() {
     return 0;
 }`;
 
+const createRoundId = () => {
+  const timePart = Date.now().toString(36);
+  const randPart = Math.random().toString(36).slice(2, 8);
+  return `rr_${timePart}_${randPart}`;
+};
+
+const REVIEW_MODES: ReviewMode[] = ['syntax', 'style', 'logic'];
+
+const EMPTY_REVIEW_LOADING: Record<ReviewMode, boolean> = {
+  syntax: false,
+  style: false,
+  logic: false,
+};
+
 export default function ReviewPage() {
   const [code, setCode] = useState(exampleCode);
   const [input, setInput] = useState('');
   const [showInput, setShowInput] = useState(false);
   const [runResult, setRunResult] = useState<RunResult | null>(null);
-  const [reviews, setReviews] = useState<{ [key: string]: ReviewResult }>({});
+  const [reviews, setReviews] = useState<Partial<Record<ReviewMode, ReviewResult>>>({});
   const [isRunning, setIsRunning] = useState(false);
-  const [isReviewing, setIsReviewing] = useState({ syntax: false, style: false, logic: false });
+  const [isReviewing, setIsReviewing] = useState<Record<ReviewMode, boolean>>(EMPTY_REVIEW_LOADING);
+  const activeRoundRef = useRef<string | null>(null);
+
+  const trackRunEvent = (roundId: string, data: RunResult, hasInput: boolean) => {
+    void logUserEvent({
+      eventType: 'review_run',
+      source: 'student/review',
+      roundId,
+      metrics: {
+        success: data.success,
+        errorType: data.errorType ?? null,
+        exitCode: data.exitCode ?? data.data?.exitCode ?? null,
+        compileTime: data.data?.compileTime ?? null,
+        runTime: data.data?.runTime ?? null,
+        totalTime: data.data?.totalTime ?? null,
+        hasInput,
+      },
+    });
+  };
+
+  const trackReviewEvent = (roundId: string, payload: ReviewBranchResponse, runData: RunResult) => {
+    void logUserEvent({
+      eventType: 'review_run',
+      source: 'student/review',
+      roundId,
+      metrics: {
+        success: runData.success,
+        errorType: runData.errorType ?? null,
+        mode: payload.metrics.mode,
+        issueCount: payload.metrics.issueCount,
+        highestSeverity: payload.metrics.highestSeverity,
+        weakCandidateCount: payload.metrics.weakCandidateCount,
+        syncAdded: payload.metrics.syncAdded,
+        syncUpdated: payload.metrics.syncUpdated,
+        syncSkipped: payload.metrics.syncSkipped,
+        syncErrors: payload.metrics.syncErrors,
+      },
+    });
+  };
 
   const handleRunCode = async () => {
+    const roundId = createRoundId();
+    const codeSnapshot = code;
+    const inputSnapshot = input || undefined;
+    activeRoundRef.current = roundId;
     setIsRunning(true);
     setRunResult(null);
     setReviews({});
+    setIsReviewing({ ...EMPTY_REVIEW_LOADING });
 
     try {
-      const data = await runCode({ code, input: input || undefined });
+      const data = await runCode({ code: codeSnapshot, input: inputSnapshot });
+      if (activeRoundRef.current !== roundId) return;
       setRunResult(data);
+      trackRunEvent(roundId, data, Boolean(inputSnapshot));
 
-      void logUserEvent({
-        eventType: 'review_run',
-        source: 'student/review',
-        metrics: {
-          success: data.success,
-          errorType: data.errorType,
-          exitCode: data.exitCode ?? data.data?.exitCode,
-        },
-      });
-
-      // Trigger parallel reviews
-      if (data.success) {
-        triggerReviews(data);
-      }
+      // Trigger all review branches even when run fails.
+      triggerReviews({ runData: data, roundId, codeSnapshot });
     } catch (error) {
       console.error('Failed to run code:', error);
-      setRunResult({
+      if (activeRoundRef.current !== roundId) return;
+      const fallbackRunResult: RunResult = {
         success: false,
         errorType: '网络错误',
         errorSummary: '无法连接到代码运行服务',
-        error: '请检查网络连接后重试'
-      });
+        error: '请检查网络连接后重试',
+      };
+      setRunResult(fallbackRunResult);
+      trackRunEvent(roundId, fallbackRunResult, Boolean(inputSnapshot));
+      triggerReviews({ runData: fallbackRunResult, roundId, codeSnapshot });
     } finally {
-      setIsRunning(false);
+      if (activeRoundRef.current === roundId) {
+        setIsRunning(false);
+      }
     }
   };
 
-  const triggerReviews = async (runData: RunResult) => {
-    const modes = ['syntax', 'style', 'logic'] as const;
-
-    modes.forEach(mode => {
-      setIsReviewing(prev => ({ ...prev, [mode]: true }));
-
+  const triggerReviews = ({
+    runData,
+    roundId,
+    codeSnapshot,
+  }: {
+    runData: RunResult;
+    roundId: string;
+    codeSnapshot: string;
+  }) => {
+    REVIEW_MODES.forEach((mode) => {
+      if (activeRoundRef.current !== roundId) return;
+      setIsReviewing((prev) => ({ ...prev, [mode]: true }));
       requestReview({
-        code,
+        code: codeSnapshot,
         mode,
         runResult: runData,
+        roundId,
       })
-        .then(data => {
-          setReviews(prev => ({ ...prev, [mode]: data }));
+        .then((data) => {
+          if (activeRoundRef.current !== roundId) return;
+          setReviews((prev) => ({ ...prev, [mode]: data.review }));
+          trackReviewEvent(roundId, data, runData);
         })
-        .catch(error => {
+        .catch((error) => {
           console.error(`Failed to review ${mode}:`, error);
-          setReviews(prev => ({
+          if (activeRoundRef.current !== roundId) return;
+          setReviews((prev) => ({
             ...prev,
             [mode]: {
               status: 'error',
               summary: '该分支暂不可用',
               details: [],
               suggestions: [],
-              questions: []
-            }
+              questions: [],
+            },
           }));
+          void logUserEvent({
+            eventType: 'review_run',
+            source: 'student/review',
+            roundId,
+            metrics: {
+              success: runData.success,
+              errorType: runData.errorType ?? null,
+              mode,
+              issueCount: 0,
+              highestSeverity: 0,
+              weakCandidateCount: 0,
+              syncAdded: 0,
+              syncUpdated: 0,
+              syncSkipped: 0,
+              syncErrors: 1,
+              reviewError: error instanceof Error ? error.message : String(error),
+            },
+          });
         })
         .finally(() => {
-          setIsReviewing(prev => ({ ...prev, [mode]: false }));
+          if (activeRoundRef.current !== roundId) return;
+          setIsReviewing((prev) => ({ ...prev, [mode]: false }));
         });
     });
   };
 
   const clearCode = () => {
+    activeRoundRef.current = null;
+    setIsRunning(false);
+    setIsReviewing({ ...EMPTY_REVIEW_LOADING });
     setCode('');
     setRunResult(null);
     setReviews({});
@@ -117,8 +209,6 @@ export default function ReviewPage() {
   const insertExample = () => {
     setCode(exampleCode);
   };
-
-  const reviewModes: Array<'syntax' | 'style' | 'logic'> = ['syntax', 'style', 'logic'];
 
   return (
     <div className="relative flex h-[calc(100vh-73px)] flex-col overflow-hidden">
@@ -297,7 +387,7 @@ export default function ReviewPage() {
                 <TabsTrigger value="logic">逻辑</TabsTrigger>
               </TabsList>
 
-              {reviewModes.map((mode) => (
+              {REVIEW_MODES.map((mode) => (
                 <TabsContent key={mode} value={mode}>
                   <ReviewContent
                     review={reviews[mode]}
