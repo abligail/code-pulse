@@ -29,7 +29,8 @@ const isEventType = (value: string): value is UserEventType =>
   || value === 'practice_submit'
   || value === 'review_run'
   || value === 'quiz_submit'
-  || value === 'knowledge_card_open';
+  || value === 'knowledge_card_open'
+  || value === 'teacher_assignment';
 
 export async function GET(request: NextRequest) {
   try {
