@@ -93,8 +93,40 @@ interface QuizCacheEntry {
 
 type QuizCheckState = QuizHistoryCheckState;
 
+const STORAGE_KEY = 'code-pulse/chat-sessions';
+const QUIZ_CACHE_KEY = 'code-pulse/weak-quiz-cache';
 const EBBINGHAUS_INTERVALS = [0.5, 1, 2, 4, 7, 15, 30];
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const SESSION_RETENTION_MS = 7 * DAY_IN_MS;
+
+const normalizeUserId = (userId?: string | null) => {
+  const trimmed = (userId ?? '').trim();
+  return trimmed || 'guest';
+};
+
+const getUserScopedStorageKey = (baseKey: string, userId?: string | null) =>
+  `${baseKey}/${normalizeUserId(userId)}`;
+
+const getCurrentUserId = () => {
+  if (typeof window === 'undefined') return 'guest';
+  return normalizeUserId(getActiveUser()?.userId);
+};
+
+const readOrMigrateScopedItem = (scopedKey: string, legacyKey: string): string | null => {
+  if (typeof window === 'undefined') return null;
+  const scopedValue = localStorage.getItem(scopedKey);
+  if (scopedValue !== null) return scopedValue;
+  if (scopedKey === legacyKey) return scopedValue;
+  const legacyValue = localStorage.getItem(legacyKey);
+  if (legacyValue === null) return null;
+  try {
+    localStorage.setItem(scopedKey, legacyValue);
+    localStorage.removeItem(legacyKey);
+  } catch (error) {
+    console.error('Failed to migrate legacy storage value', error);
+  }
+  return legacyValue;
+};
 
 const findWeakScoreRecursively = (value: unknown): number | null => {
   if (!value) return null;
@@ -149,10 +181,11 @@ const extractWeakScoreFromMessage = (text: string): number | null => {
   return null;
 };
 
-const readInitialQuizCache = (): Record<string, QuizCacheEntry> => {
+const readInitialQuizCache = (userId: string): Record<string, QuizCacheEntry> => {
   if (typeof window === 'undefined') return {};
   try {
-    const raw = localStorage.getItem('code-pulse/weak-quiz-cache');
+    const storageKey = getUserScopedStorageKey(QUIZ_CACHE_KEY, userId);
+    const raw = readOrMigrateScopedItem(storageKey, QUIZ_CACHE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Record<string, QuizCacheEntry>;
       return parsed;
@@ -176,6 +209,7 @@ const splitAnswers = (text: string): string[] => {
 };
 
 export default function ChatPage() {
+  const initialUserIdRef = useRef<string>(getCurrentUserId());
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -198,15 +232,13 @@ export default function ChatPage() {
   const [quizReview, setQuizReview] = useState('');
   const [quizReviewLoading, setQuizReviewLoading] = useState(false);
   const [quizReviewError, setQuizReviewError] = useState<string | null>(null);
-  const [quizCache, setQuizCache] = useState<Record<string, QuizCacheEntry>>(() => readInitialQuizCache());
+  const [quizCache, setQuizCache] = useState<Record<string, QuizCacheEntry>>(() =>
+    readInitialQuizCache(initialUserIdRef.current)
+  );
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const quizCacheRef = useRef<Record<string, QuizCacheEntry>>(quizCache);
   const [activeWeakPoint, setActiveWeakPoint] = useState<WeakKnowledgePoint | null>(null);
-
-  const STORAGE_KEY = 'code-pulse/chat-sessions';
-  const QUIZ_CACHE_KEY = 'code-pulse/weak-quiz-cache';
-  const SESSION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
   const pruneSessions = useCallback((list: ChatSession[]) => {
     const now = Date.now();
@@ -218,16 +250,17 @@ export default function ChatPage() {
 
   // Load history from localStorage on mount
   useEffect(() => {
-    const user = getActiveUser();
-    void loadWeakPoints(user?.userId ?? 'guest');
+    const userId = getCurrentUserId();
+    const storageKey = getUserScopedStorageKey(STORAGE_KEY, userId);
+    void loadWeakPoints(userId);
 
     try {
-      const raw = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null;
+      const raw = readOrMigrateScopedItem(storageKey, STORAGE_KEY);
       if (raw) {
         const stored: ChatSession[] = JSON.parse(raw);
         const recent = pruneSessions(stored);
         if (recent.length !== stored.length && typeof window !== 'undefined') {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(recent));
+          localStorage.setItem(storageKey, JSON.stringify(recent));
         }
         const prepared = recent.map((session) => ({
           ...session,
@@ -271,7 +304,7 @@ export default function ChatPage() {
     };
     setSessions([initialSession]);
     if (typeof window !== 'undefined') {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify([initialSession]));
+      localStorage.setItem(storageKey, JSON.stringify([initialSession]));
     }
   }, [pruneSessions]);
 
@@ -283,7 +316,8 @@ export default function ChatPage() {
   useEffect(() => {
     if (typeof window === 'undefined') return;
     try {
-      localStorage.setItem(QUIZ_CACHE_KEY, JSON.stringify(quizCache));
+      const storageKey = getUserScopedStorageKey(QUIZ_CACHE_KEY, getCurrentUserId());
+      localStorage.setItem(storageKey, JSON.stringify(quizCache));
     } catch (error) {
       console.error('Failed to persist quiz cache', error);
     }
@@ -314,6 +348,7 @@ export default function ChatPage() {
   // Persist current session to localStorage whenever messages or conversationId change
   useEffect(() => {
     if (!currentSessionId) return;
+    const storageKey = getUserScopedStorageKey(STORAGE_KEY, getCurrentUserId());
     setSessions((prev) => {
       const nextSessions = [...prev];
       const idx = nextSessions.findIndex((s) => s.sessionId === currentSessionId);
@@ -347,7 +382,7 @@ export default function ChatPage() {
       }
       const pruned = pruneSessions(nextSessions);
       if (typeof window !== 'undefined') {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(pruned));
+        localStorage.setItem(storageKey, JSON.stringify(pruned));
       }
       return pruned;
     });
@@ -722,7 +757,7 @@ export default function ChatPage() {
           checkResult: checks[idx] ?? 'skip',
         })),
       };
-      appendQuizHistoryEntry(entry);
+      appendQuizHistoryEntry(entry, { userId: getCurrentUserId() });
     },
     [quizMeta, quizQuestions, quizAnswers, activeWeakPoint]
   );
@@ -1051,7 +1086,8 @@ export default function ChatPage() {
         ...prev,
       ];
       if (typeof window !== 'undefined') {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+        const storageKey = getUserScopedStorageKey(STORAGE_KEY, getCurrentUserId());
+        localStorage.setItem(storageKey, JSON.stringify(next));
       }
       return next;
     });
