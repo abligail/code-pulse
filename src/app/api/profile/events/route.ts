@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import type { UserEventDTO } from '@/lib/api/types';
+import type { UserEventDTO, UserEventType } from '@/lib/api/types';
 
 const eventStore: UserEventDTO[] = [];
 
@@ -10,13 +10,46 @@ const getUserId = (request: NextRequest) => {
   return searchParams.get('userId');
 };
 
+const getQueryValue = (searchParams: URLSearchParams, key: string) => {
+  const raw = searchParams.get(key);
+  if (!raw) return null;
+  const value = raw.trim();
+  return value.length > 0 ? value : null;
+};
+
+const parseLimit = (value: string | null) => {
+  if (!value) return 0;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.floor(parsed);
+};
+
+const isEventType = (value: string): value is UserEventType =>
+  value === 'chat_round'
+  || value === 'practice_submit'
+  || value === 'review_run'
+  || value === 'quiz_submit'
+  || value === 'knowledge_card_open';
+
 export async function GET(request: NextRequest) {
   try {
-    const userId = getUserId(request);
     const { searchParams } = new URL(request.url);
-    const limit = Number(searchParams.get('limit') || 0);
+    const userId = getUserId(request);
+    const eventTypeQuery = getQueryValue(searchParams, 'eventType');
+    const source = getQueryValue(searchParams, 'source');
+    const limit = parseLimit(searchParams.get('limit'));
 
-    const filtered = userId ? eventStore.filter((event) => event.userId === userId) : eventStore;
+    let filtered = eventStore.slice();
+    if (userId) {
+      filtered = filtered.filter((event) => event.userId === userId);
+    }
+    if (eventTypeQuery && isEventType(eventTypeQuery)) {
+      filtered = filtered.filter((event) => event.eventType === eventTypeQuery);
+    }
+    if (source) {
+      filtered = filtered.filter((event) => event.source === source);
+    }
+
     const ordered = filtered
       .slice()
       .sort(

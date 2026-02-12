@@ -1,12 +1,19 @@
 import { apiGet, apiPost } from '@/lib/api/client';
 import { getActiveUser } from '@/lib/auth/session';
-import type { UserEventDTO } from '@/lib/api/types';
+import type { UserEventDTO, UserEventType } from '@/lib/api/types';
 
 export type TrackEventInput = Omit<UserEventDTO, 'eventId' | 'userId' | 'occurredAt'> & {
   userId?: string;
   eventId?: string;
   occurredAt?: string;
 };
+
+export interface FetchUserEventsOptions {
+  limit?: number;
+  eventType?: UserEventType;
+  source?: string;
+  userId?: string;
+}
 
 const createEventId = () => {
   const timePart = Date.now().toString(36);
@@ -39,8 +46,12 @@ export const logUserEvent = async (input: TrackEventInput) => {
   return event;
 };
 
-export const fetchUserEvents = (limit = 8) => {
+export const fetchUserEvents = (optionsOrLimit: number | FetchUserEventsOptions = 8) => {
+  const options = typeof optionsOrLimit === 'number' ? { limit: optionsOrLimit } : optionsOrLimit;
   const params = new URLSearchParams();
-  if (limit) params.set('limit', String(limit));
+  if (options.limit) params.set('limit', String(options.limit));
+  if (options.eventType) params.set('eventType', options.eventType);
+  if (options.source) params.set('source', options.source);
+  if (options.userId) params.set('userId', options.userId);
   return apiGet<{ events: UserEventDTO[] }>(`/api/profile/events?${params.toString()}`);
 };
