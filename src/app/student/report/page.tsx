@@ -10,7 +10,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { getActiveUser } from '@/lib/auth/session';
 import { fetchUserEvents } from '@/lib/api/events';
 import type { UserEventDTO } from '@/lib/api/types';
-import { readQuizHistoryEntries, QUIZ_HISTORY_EVENT, QUIZ_HISTORY_STORAGE_KEY, type QuizHistoryEntry } from '@/lib/storage/quiz-history';
+import { readQuizHistoryEntries, QUIZ_HISTORY_EVENT, getQuizHistoryStorageKey, type QuizHistoryEntry } from '@/lib/storage/quiz-history';
 
 const preferenceLabelMap: Record<string, string> = {
   content_format: '内容形式',
@@ -276,7 +276,8 @@ export default function ReportPage() {
   }, []);
 
   const syncQuizHistory = useCallback(() => {
-    setQuizHistory(readQuizHistoryEntries());
+    const userId = getActiveUser()?.userId;
+    setQuizHistory(readQuizHistoryEntries(userId));
   }, []);
 
   const loadReviewHistory = useCallback(async () => {
@@ -310,7 +311,8 @@ export default function ReportPage() {
     if (typeof window === 'undefined') return;
     const handleCustom = () => syncQuizHistory();
     const handleStorage = (event: StorageEvent) => {
-      if (event.key === QUIZ_HISTORY_STORAGE_KEY) {
+      const scopedKey = getQuizHistoryStorageKey(getActiveUser()?.userId);
+      if (event.key === scopedKey) {
         syncQuizHistory();
       }
     };
