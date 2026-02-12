@@ -1,461 +1,263 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { ArrowLeft, Play, Send, Loader2, CheckCircle2, XCircle, Clock, BookOpen } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { CheckCircle2, Loader2, XCircle } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Textarea } from '@/components/ui/textarea';
-import { PageHeader, PageHeaderActions, PageHeaderDescription, PageHeaderFilters, PageHeaderHeading, PageHeaderTitle } from '@/components/ui/page-header';
+import { PageHeader, PageHeaderDescription, PageHeaderHeading, PageHeaderTitle } from '@/components/ui/page-header';
 import { PageState } from '@/components/ui/page-state';
-import { fetchPracticeDetail, fetchPracticeList, submitPractice, type PracticeDetail, type PracticeItem, type PracticeSource, type SubmitResult } from '@/lib/api/practice';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { logUserEvent } from '@/lib/api/events';
+import {
+  fetchSinglePracticeQuestion,
+  submitSinglePracticeAnswer,
+  type ChoiceOption,
+  type PracticeQuestion,
+  type PracticeStrategy,
+  type SingleAnswerResponse,
+} from '@/lib/api/practice';
+
+const STRATEGY_LABEL: Record<PracticeStrategy, string> = {
+  weakest: '补弱优先',
+  spaced: '间隔重复',
+};
+
+const OPTION_ORDER: ChoiceOption[] = ['A', 'B', 'C', 'D'];
 
 export default function PracticePage() {
-  const [selectedPractice, setSelectedPractice] = useState<PracticeItem | null>(null);
-  const [practiceDetail, setPracticeDetail] = useState<PracticeDetail | null>(null);
-  const [practiceList, setPracticeList] = useState<PracticeItem[]>([]);
-  const [code, setCode] = useState('');
-  const [submitResult, setSubmitResult] = useState<SubmitResult | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [strategy, setStrategy] = useState<PracticeStrategy>('weakest');
+  const [question, setQuestion] = useState<PracticeQuestion | null>(null);
+  const [zpdApplied, setZpdApplied] = useState(false);
+  const [selectedOption, setSelectedOption] = useState<ChoiceOption | null>(null);
+  const [answerResult, setAnswerResult] = useState<SingleAnswerResponse | null>(null);
+  const [isLoadingQuestion, setIsLoadingQuestion] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [listError, setListError] = useState<string | null>(null);
-  const [filterTopic, setFilterTopic] = useState('all');
-  const [filterLevel, setFilterLevel] = useState('all');
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    loadPracticeList();
-  }, [filterTopic, filterLevel]);
+  const visibleOptions = useMemo(
+    () => OPTION_ORDER.filter((key) => Boolean(question?.options[key])),
+    [question]
+  );
 
-  const loadPracticeList = async () => {
-    setIsLoading(true);
-    setListError(null);
+  const loadQuestion = async () => {
+    setIsLoadingQuestion(true);
+    setError(null);
+    setAnswerResult(null);
+    setSelectedOption(null);
     try {
-      const data = await fetchPracticeList(filterTopic, filterLevel);
-      setPracticeList(data.items || []);
-    } catch (error) {
-      console.error('Failed to fetch practice list:', error);
-      setPracticeList([]);
-      setListError('练习列表加载失败，请稍后重试。');
+      const data = await fetchSinglePracticeQuestion(strategy);
+      if (!data.question.id || !data.question.stem || OPTION_ORDER.every((key) => !data.question.options[key])) {
+        throw new Error('题目数据不完整');
+      }
+      setQuestion(data.question);
+      setZpdApplied(data.zpdApplied);
+    } catch (loadError) {
+      console.error('Failed to load single practice question', loadError);
+      setQuestion(null);
+      setError('获取题目失败，请确认后端接口已启动。');
     } finally {
-      setIsLoading(false);
+      setIsLoadingQuestion(false);
     }
   };
 
-  const loadPracticeDetail = async (id: string) => {
-    setIsLoading(true);
-    try {
-      const data = await fetchPracticeDetail(id);
-      setPracticeDetail(data);
-      setCode('');
-      setSubmitResult(null);
-    } catch (error) {
-      console.error('Failed to fetch practice detail:', error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handlePracticeSelect = (item: PracticeItem) => {
-    setSelectedPractice(item);
-    loadPracticeDetail(item.id);
-  };
-
-  const handleBack = () => {
-    setSelectedPractice(null);
-    setPracticeDetail(null);
-    setSubmitResult(null);
-  };
-
-  const handleSubmit = async () => {
-    if (!selectedPractice || !code.trim()) return;
-
+  const submitAnswer = async () => {
+    if (!question || !selectedOption || answerResult) return;
     setIsSubmitting(true);
+    setError(null);
     try {
-      const data = await submitPractice({ id: selectedPractice.id, code });
-      setSubmitResult(data);
-
+      const data = await submitSinglePracticeAnswer({
+        question_id: question.id,
+        selected_option: selectedOption,
+      });
+      setAnswerResult(data);
       void logUserEvent({
         eventType: 'practice_submit',
         source: 'student/practice',
         metrics: {
-          practiceId: selectedPractice.id,
-          status: data.status,
-          score: data.score,
-          topic: selectedPractice.topic,
-          level: selectedPractice.level,
-          sourceTag: selectedPractice.source,
+          strategy,
+          questionId: question.id,
+          selectedOption: data.selectedOption,
+          correctOption: data.correctOption,
+          isCorrect: data.isCorrect,
+          knowledgePoints: question.knowledgePoints,
         },
       });
-    } catch (error) {
-      console.error('Failed to submit practice:', error);
+    } catch (submitError) {
+      console.error('Failed to submit single answer', submitError);
+      setError('提交答案失败，请稍后重试。');
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const getLevelColor = (level: string) => {
-    switch (level) {
-      case '入门': return 'bg-green-100 text-green-800';
-      case '基础': return 'bg-blue-100 text-blue-800';
-      case '提高': return 'bg-purple-100 text-purple-800';
-      default: return 'bg-gray-100 text-gray-800';
-    }
-  };
+  const isAnswered = Boolean(answerResult);
 
-  const getStatusBadge = (status: string) => {
-    switch (status) {
-      case 'done': return <Badge className="bg-green-600">已完成</Badge>;
-      case 'in_progress': return <Badge variant="secondary">进行中</Badge>;
-      default: return <Badge variant="outline">新题目</Badge>;
-    }
-  };
-
-  const getSourceLabel = (source?: PracticeSource) => {
-    switch (source) {
-      case 'weak':
-        return '薄弱点推荐';
-      case 'teacher':
-        return '教师要求';
-      case 'review':
-        return '复习队列';
-      case 'system':
-        return '系统推荐';
-      default:
-        return '';
-    }
-  };
-
-  const getAdaptiveClass = (level?: string) => {
-    switch (level) {
-      case '入门':
-        return 'bg-emerald-50 text-emerald-700 border-emerald-200';
-      case '基础':
-        return 'bg-blue-50 text-blue-700 border-blue-200';
-      case '提高':
-        return 'bg-purple-50 text-purple-700 border-purple-200';
-      default:
-        return 'bg-muted text-muted-foreground';
-    }
-  };
-
-  const renderSourceBadge = (source?: PracticeSource) => {
-    if (!source) return null;
-    return (
-      <Badge variant="secondary" className="text-xs">
-        来源：{getSourceLabel(source)}
-      </Badge>
-    );
-  };
-
-  const renderAdaptiveBadge = (level?: string) => {
-    if (!level) return null;
-    return (
-      <Badge variant="outline" className={`text-xs ${getAdaptiveClass(level)}`}>
-        建议难度：{level}
-      </Badge>
-    );
-  };
-
-  if (!selectedPractice || !practiceDetail) {
-    // List View
-    return (
-      <div className="h-[calc(100vh-73px)] p-6">
-        <div className="max-w-5xl mx-auto">
-          <PageHeader className="mb-4">
-            <PageHeaderHeading>
-              <PageHeaderTitle>练习与评测</PageHeaderTitle>
-              <PageHeaderDescription>根据薄弱点与学习进度推荐练习任务</PageHeaderDescription>
-            </PageHeaderHeading>
-          </PageHeader>
-
-          <PageHeaderFilters className="mb-6">
-            <Select value={filterTopic} onValueChange={setFilterTopic}>
-              <SelectTrigger className="w-40">
-                <SelectValue placeholder="选择主题" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部主题</SelectItem>
-                <SelectItem value="数组">数组</SelectItem>
-                <SelectItem value="指针">指针</SelectItem>
-                <SelectItem value="递归">递归</SelectItem>
-                <SelectItem value="链表">链表</SelectItem>
-                <SelectItem value="排序">排序</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select value={filterLevel} onValueChange={setFilterLevel}>
-              <SelectTrigger className="w-40">
-                <SelectValue placeholder="选择难度" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部难度</SelectItem>
-                <SelectItem value="入门">入门</SelectItem>
-                <SelectItem value="基础">基础</SelectItem>
-                <SelectItem value="提高">提高</SelectItem>
-              </SelectContent>
-            </Select>
-          </PageHeaderFilters>
-
-          {isLoading && practiceList.length === 0 && (
-            <PageState
-              variant="loading"
-              size="sm"
-              className="border-0 bg-transparent"
-              description="正在加载练习列表..."
-            />
-          )}
-
-          {!isLoading && listError && (
-            <PageState
-              variant="error"
-              size="sm"
-              className="border-0 bg-transparent"
-              title="练习列表加载失败"
-              description={listError}
-              action={(
-                <Button variant="outline" onClick={loadPracticeList}>
-                  重试
-                </Button>
-              )}
-            />
-          )}
-
-          {!isLoading && !listError && practiceList.length === 0 && (
-            <PageState
-              variant="empty"
-              size="sm"
-              className="border-0 bg-transparent"
-              title="暂无练习"
-              description="可先去问答页提问或选择主题生成练习"
-              icon={BookOpen}
-            />
-          )}
-
-          <div className="grid gap-4">
-            {practiceList.map((item) => (
-              <Card 
-                key={item.id}
-                className="cursor-pointer hover:shadow-md transition-shadow"
-                onClick={() => handlePracticeSelect(item)}
-              >
-                <CardHeader>
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <CardTitle className="text-lg mb-2">{item.title}</CardTitle>
-                      <CardDescription className="flex items-center gap-2 flex-wrap">
-                        <Badge variant="outline">{item.topic}</Badge>
-                        <Badge className={getLevelColor(item.level)}>{item.level}</Badge>
-                        <div className="flex items-center text-xs">
-                          <Clock className="w-3 h-3 mr-1" />
-                          预计 15-30 分钟
-                        </div>
-                      </CardDescription>
-                      {(item.source || item.adaptiveLevel || item.sourceNote || item.adaptiveNote) && (
-                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                          {renderSourceBadge(item.source)}
-                          {renderAdaptiveBadge(item.adaptiveLevel)}
-                          {item.sourceNote && <span>{item.sourceNote}</span>}
-                          {item.adaptiveNote && <span>{item.adaptiveNote}</span>}
-                        </div>
-                      )}
-                    </div>
-                    {getStatusBadge(item.status)}
-                  </div>
-                </CardHeader>
-              </Card>
-            ))}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Detail View
   return (
-    <div className="h-[calc(100vh-73px)] flex flex-col">
-      {/* Header */}
-      <div className="px-6 py-4 border-b bg-card">
-        <Button variant="ghost" size="sm" onClick={handleBack}>
-          <ArrowLeft className="w-4 h-4 mr-2" />
-          返回列表
-        </Button>
-        <PageHeader className="mt-4">
+    <div className="h-[calc(100vh-73px)] overflow-y-auto p-6">
+      <div className="mx-auto max-w-5xl space-y-5">
+        <PageHeader>
           <PageHeaderHeading>
-            <PageHeaderTitle>{practiceDetail.title}</PageHeaderTitle>
-            {(selectedPractice.sourceNote || selectedPractice.adaptiveNote) && (
-              <PageHeaderDescription>
-                {[selectedPractice.sourceNote, selectedPractice.adaptiveNote].filter(Boolean).join(' · ')}
-              </PageHeaderDescription>
-            )}
+            <PageHeaderTitle>练习与评测</PageHeaderTitle>
+            <PageHeaderDescription>单题模式：补弱优先与间隔重复</PageHeaderDescription>
           </PageHeaderHeading>
-          <PageHeaderActions>
-            <Badge variant="outline">{selectedPractice.topic}</Badge>
-            <Badge className={getLevelColor(selectedPractice.level)}>{selectedPractice.level}</Badge>
-            {renderSourceBadge(selectedPractice.source)}
-            {renderAdaptiveBadge(selectedPractice.adaptiveLevel)}
-          </PageHeaderActions>
         </PageHeader>
-      </div>
 
-      {/* Content */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left: Problem Description */}
-        <div className="w-[45%] overflow-y-auto p-6 border-r">
-          <ScrollArea className="h-full">
-            <div className="space-y-6">
-              <div>
-                <h3 className="text-lg font-semibold mb-3">题目描述</h3>
-                <div className="prose prose-sm max-w-none">
-                  {practiceDetail.promptMarkdown.split('\n').map((line, i) => {
-                    if (line.startsWith('#')) {
-                      const level = line.match(/^#+/)?.[0].length || 1;
-                      const text = line.replace(/^#+\s*/, '');
-                      return <h4 key={i} className={`font-semibold mt-4 ${level === 1 ? 'text-base' : 'text-sm'}`}>{text}</h4>;
-                    }
-                    if (line.startsWith('```')) {
-                      return <pre key={i} className="bg-muted p-3 rounded text-sm font-mono mt-2">{line.replace(/```/g, '')}</pre>;
-                    }
-                    if (line.startsWith('**') && line.endsWith('**')) {
-                      return <p key={i} className="font-medium mt-2">{line.replace(/\*\*/g, '')}</p>;
-                    }
-                    if (line.startsWith('- ')) {
-                      return <li key={i} className="text-sm ml-4">{line.replace('- ', '')}</li>;
-                    }
-                    return <p key={i} className="text-sm text-muted-foreground">{line}</p>;
-                  })}
-                </div>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">出题方式</CardTitle>
+            <CardDescription>选择单题策略后生成选择题，提交后会更新用户画像</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap items-center gap-3">
+            <Button
+              type="button"
+              variant={strategy === 'weakest' ? 'default' : 'outline'}
+              onClick={() => setStrategy('weakest')}
+              disabled={isLoadingQuestion || isSubmitting}
+            >
+              补弱优先
+            </Button>
+            <Button
+              type="button"
+              variant={strategy === 'spaced' ? 'default' : 'outline'}
+              onClick={() => setStrategy('spaced')}
+              disabled={isLoadingQuestion || isSubmitting}
+            >
+              间隔重复
+            </Button>
+            <Button type="button" onClick={loadQuestion} disabled={isLoadingQuestion || isSubmitting}>
+              {isLoadingQuestion ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  生成中...
+                </>
+              ) : (
+                '生成单题'
+              )}
+            </Button>
+            {question && (
+              <>
+                <Badge variant="secondary">策略：{STRATEGY_LABEL[strategy]}</Badge>
+                <Badge variant="outline">{zpdApplied ? '已应用ZPD筛选' : '未应用ZPD筛选'}</Badge>
+              </>
+            )}
+          </CardContent>
+        </Card>
+
+        {error && (
+          <PageState
+            variant="error"
+            size="sm"
+            className="border-0 bg-transparent"
+            title="操作失败"
+            description={error}
+          />
+        )}
+
+        {!question && !isLoadingQuestion && !error && (
+          <PageState
+            variant="empty"
+            size="sm"
+            className="border-0 bg-transparent"
+            title="暂无题目"
+            description="请选择出题方式后点击“生成单题”"
+          />
+        )}
+
+        {question && (
+          <Card>
+            <CardHeader className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <Badge variant="outline">题目ID: {question.id}</Badge>
+                <Badge variant="outline">题型: {question.type}</Badge>
+                {question.knowledgePoints.map((point) => (
+                  <Badge key={point} variant="secondary">{point}</Badge>
+                ))}
               </div>
+              <CardTitle className="text-lg leading-relaxed">{question.stem}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <RadioGroup
+                value={selectedOption ?? ''}
+                onValueChange={(value) => setSelectedOption(value as ChoiceOption)}
+                disabled={isAnswered}
+              >
+                {visibleOptions.map((option) => {
+                  const isSelected = selectedOption === option;
+                  const isCorrect = answerResult?.correctOption === option;
+                  const isWrongChoice = isAnswered && isSelected && !isCorrect;
+                  const className = isCorrect
+                    ? 'border-emerald-500 bg-emerald-50'
+                    : isWrongChoice
+                      ? 'border-red-500 bg-red-50'
+                      : 'border-border';
 
-              <div>
-                <h3 className="text-lg font-semibold mb-3">输入输出说明</h3>
-                <p className="text-sm text-muted-foreground whitespace-pre-line">
-                  {practiceDetail.ioDesc}
-                </p>
+                  return (
+                    <label
+                      key={option}
+                      htmlFor={`option-${option}`}
+                      className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 text-sm ${className}`}
+                    >
+                      <RadioGroupItem id={`option-${option}`} value={option} />
+                      <div className="space-y-1">
+                        <p className="font-medium">{option}</p>
+                        <p className="text-muted-foreground">{question.options[option]}</p>
+                      </div>
+                    </label>
+                  );
+                })}
+              </RadioGroup>
+
+              <div className="flex flex-wrap gap-3">
+                <Button onClick={submitAnswer} disabled={isSubmitting || !selectedOption || isAnswered}>
+                  {isSubmitting ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      提交中...
+                    </>
+                  ) : (
+                    '提交答案'
+                  )}
+                </Button>
+                <Button type="button" variant="outline" onClick={loadQuestion} disabled={isLoadingQuestion || isSubmitting}>
+                  再来一题
+                </Button>
               </div>
+            </CardContent>
+          </Card>
+        )}
 
-              <div>
-                <h3 className="text-lg font-semibold mb-3">示例</h3>
-                <div className="space-y-3">
-                  {practiceDetail.samples.map((sample, i) => (
-                    <Card key={i}>
-                      <CardHeader className="pb-3">
-                        <CardDescription>示例 {i + 1}</CardDescription>
-                      </CardHeader>
-                      <CardContent className="space-y-2">
-                        <div>
-                          <span className="text-xs font-medium">输入：</span>
-                          <pre className="bg-muted p-2 rounded text-xs font-mono mt-1">{sample.input}</pre>
-                        </div>
-                        <div>
-                          <span className="text-xs font-medium">输出：</span>
-                          <pre className="bg-muted p-2 rounded text-xs font-mono mt-1">{sample.output}</pre>
-                        </div>
-                      </CardContent>
-                    </Card>
+        {answerResult && (
+          <Card className={answerResult.isCorrect ? 'border-emerald-500' : 'border-red-500'}>
+            <CardHeader>
+              <CardTitle className={`flex items-center gap-2 ${answerResult.isCorrect ? 'text-emerald-700' : 'text-red-600'}`}>
+                {answerResult.isCorrect ? <CheckCircle2 className="h-5 w-5" /> : <XCircle className="h-5 w-5" />}
+                {answerResult.isCorrect ? '回答正确' : '回答错误'}
+              </CardTitle>
+              <CardDescription>
+                你的答案：{answerResult.selectedOption} · 正确答案：{answerResult.correctOption}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <p className="text-sm font-medium">画像掌握度更新</p>
+              {Object.keys(answerResult.updatedKcMastery).length === 0 ? (
+                <p className="text-sm text-muted-foreground">后端未返回知识点掌握度明细。</p>
+              ) : (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {Object.entries(answerResult.updatedKcMastery).map(([name, score]) => (
+                    <div key={name} className="rounded-md border bg-muted/30 px-3 py-2 text-sm">
+                      <span className="font-medium">{name}</span>
+                      <span className="ml-2 text-muted-foreground">{Number(score).toFixed(3)}</span>
+                    </div>
                   ))}
                 </div>
-              </div>
-            </div>
-          </ScrollArea>
-        </div>
-
-        {/* Right: Code Editor & Result */}
-        <div className="flex-1 flex flex-col">
-          {/* Editor */}
-          <div className="flex-1 flex flex-col p-4">
-            <div className="flex-1 relative bg-muted rounded-lg overflow-hidden">
-              <Textarea
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                className="flex-1 min-h-[300px] font-mono text-sm resize-none border-0 focus-visible:ring-0"
-                placeholder="// 在此编写你的代码..."
-                spellCheck={false}
-              />
-            </div>
-
-            <div className="flex gap-2 mt-4">
-              <Button 
-                variant="outline"
-                className="flex-1"
-                disabled={!code.trim()}
-              >
-                <Play className="w-4 h-4 mr-2" />
-                运行测试
-              </Button>
-              <Button 
-                className="flex-1"
-                onClick={handleSubmit}
-                disabled={isSubmitting || !code.trim()}
-              >
-                {isSubmitting ? (
-                  <>
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    提交中...
-                  </>
-                ) : (
-                  <>
-                    <Send className="w-4 h-4 mr-2" />
-                    提交评测
-                  </>
-                )}
-              </Button>
-            </div>
-          </div>
-
-          {/* Result */}
-          <div className="flex-1 overflow-y-auto p-4 border-t bg-muted/20">
-            {!submitResult ? (
-              <PageState
-                variant="empty"
-                size="sm"
-                className="border-0 bg-transparent"
-                title="尚无评测结果"
-                description="点击“提交评测”查看结果"
-              />
-            ) : submitResult.status === 'pass' ? (
-              <Card className="border-green-600">
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-green-600">
-                    <CheckCircle2 className="w-5 h-5" />
-                    测试通过
-                  </CardTitle>
-                  <CardDescription>得分: {submitResult.score}分</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <p className="text-sm">{submitResult.feedback}</p>
-                </CardContent>
-              </Card>
-            ) : (
-              <Card className="border-destructive">
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-destructive">
-                    <XCircle className="w-5 h-5" />
-                    测试未通过
-                  </CardTitle>
-                  <CardDescription>得分: {submitResult.score}分</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <p className="text-sm">{submitResult.feedback}</p>
-                  {submitResult.hints.length > 0 && (
-                    <Alert>
-                      <AlertDescription>
-                        <div className="font-medium mb-2">提示：</div>
-                        <ul className="space-y-1">
-                          {submitResult.hints.map((hint, i) => (
-                            <li key={i} className="text-sm">• {hint}</li>
-                          ))}
-                        </ul>
-                      </AlertDescription>
-                    </Alert>
-                  )}
-                </CardContent>
-              </Card>
-            )}
-          </div>
-        </div>
+              )}
+              {answerResult.profileUpdateTime && (
+                <p className="text-xs text-muted-foreground">更新时间：{answerResult.profileUpdateTime}</p>
+              )}
+            </CardContent>
+          </Card>
+        )}
       </div>
     </div>
   );
