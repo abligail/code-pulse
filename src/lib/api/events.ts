@@ -13,10 +13,12 @@ export interface FetchUserEventsOptions {
   eventType?: UserEventType;
   source?: string;
   userId?: string;
+  includeAll?: boolean;
 }
 
 export const TEACHER_ASSIGNMENT_EVENT_TYPE: UserEventType = 'teacher_assignment';
 export const TEACHER_ASSIGNMENT_SOURCE = 'teacher/requirements';
+export const TEACHER_ASSIGNMENT_ANSWER_SOURCE = 'student/practice/teacher-assignment';
 
 export type TeacherAssignmentQuestionType = 'single' | 'blank' | 'essay';
 
@@ -56,6 +58,42 @@ export interface SendTeacherAssignmentInput {
 export interface FetchTeacherAssignmentsOptions {
   limit?: number;
   userId?: string;
+  includeAll?: boolean;
+}
+
+export interface TeacherAssignmentSingleAnswer {
+  questionType: 'single';
+  selectedIndex: number;
+  selectedLabel: string;
+  selectedText: string;
+}
+
+export interface TeacherAssignmentBlankAnswer {
+  questionType: 'blank';
+  answers: string[];
+}
+
+export interface TeacherAssignmentEssayAnswer {
+  questionType: 'essay';
+  answerText: string;
+}
+
+export type TeacherAssignmentAnswerPayload =
+  | TeacherAssignmentSingleAnswer
+  | TeacherAssignmentBlankAnswer
+  | TeacherAssignmentEssayAnswer;
+
+export interface SubmitTeacherAssignmentAnswerInput {
+  assignmentId: string;
+  version: number;
+  questionType: TeacherAssignmentQuestionType;
+  answer: TeacherAssignmentAnswerPayload;
+  title?: string;
+  stem?: string;
+  senderId?: string;
+  senderName?: string;
+  userId?: string;
+  submittedAt?: string;
 }
 
 const createEventId = () => {
@@ -96,6 +134,7 @@ export const fetchUserEvents = (optionsOrLimit: number | FetchUserEventsOptions 
   if (options.eventType) params.set('eventType', options.eventType);
   if (options.source) params.set('source', options.source);
   if (options.userId) params.set('userId', options.userId);
+  if (options.includeAll) params.set('includeAll', '1');
   return apiGet<{ events: UserEventDTO[] }>(`/api/profile/events?${params.toString()}`);
 };
 
@@ -143,4 +182,39 @@ export const fetchTeacherAssignments = (options: FetchTeacherAssignmentsOptions 
     eventType: TEACHER_ASSIGNMENT_EVENT_TYPE,
     source: TEACHER_ASSIGNMENT_SOURCE,
     userId: options.userId,
+    includeAll: options.includeAll,
   });
+
+export const submitTeacherAssignmentAnswer = async (input: SubmitTeacherAssignmentAnswerInput) => {
+  const activeUser = getActiveUser();
+  const userId = input.userId || activeUser?.userId;
+  if (!userId) {
+    throw new Error('缺少 userId');
+  }
+
+  const occurredAt = input.submittedAt || new Date().toISOString();
+  const normalizedVersion = Number.isFinite(input.version) ? Math.max(1, Math.floor(input.version)) : 1;
+  const event: UserEventDTO = {
+    eventId: createEventId(),
+    userId,
+    occurredAt,
+    eventType: 'practice_submit',
+    source: TEACHER_ASSIGNMENT_ANSWER_SOURCE,
+    roundId: input.assignmentId.trim(),
+    metrics: {
+      assignmentId: input.assignmentId.trim(),
+      version: normalizedVersion,
+      questionType: input.questionType,
+      title: (input.title || '').trim(),
+      stem: (input.stem || '').trim(),
+      senderId: (input.senderId || '').trim(),
+      senderName: (input.senderName || '').trim(),
+      answer: input.answer,
+      submittedAt: occurredAt,
+      fromTeacherAssignment: true,
+    },
+  };
+
+  await apiPost<{ ok: boolean }>('/api/profile/events', event);
+  return event;
+};

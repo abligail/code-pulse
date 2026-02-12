@@ -29,7 +29,7 @@ import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { ClientIcon } from '@/components/client-icon';
-import { getActiveUser } from '@/lib/auth/session';
+import { getActiveUser, listUsers, type LocalUser } from '@/lib/auth/session';
 import {
   fetchTeacherAssignments,
   sendTeacherAssignment,
@@ -68,6 +68,11 @@ interface AssignmentHistoryRecord {
 
 const DRAFT_STORAGE_PREFIX = 'teacher-requirements-draft';
 const MAX_OPTIONS = 6;
+const CLASS_ID_LABEL_MAP: Record<string, string> = {
+  class1: '计算机1班',
+  class2: '计算机2班',
+  class3: '计算机3班',
+};
 
 const QUESTION_TYPE_LABEL: Record<TeacherAssignmentQuestionType, string> = {
   single: '选择题',
@@ -151,6 +156,8 @@ const parseTargetUserIds = (raw: string) =>
     )
   );
 
+const normalizeClassKey = (value?: string | null) => (value || '').trim().toLowerCase();
+
 const formatDateTime = (value?: string | null) => {
   if (!value) return '—';
   const date = new Date(value);
@@ -214,6 +221,7 @@ export default function TeacherRequirementsPage() {
   const [teacherUserId, setTeacherUserId] = useState('');
   const [teacherName, setTeacherName] = useState('教师');
   const [teacherClassName, setTeacherClassName] = useState('');
+  const [localStudents, setLocalStudents] = useState<LocalUser[]>([]);
 
   const [draft, setDraft] = useState<AssignmentDraft>(() => createInitialDraft());
   const [isDraftReady, setIsDraftReady] = useState(false);
@@ -239,6 +247,26 @@ export default function TeacherRequirementsPage() {
   );
 
   const targetUserIdList = useMemo(() => parseTargetUserIds(draft.targetUserIds), [draft.targetUserIds]);
+
+  const activeTargetClassName = useMemo(() => {
+    const fromClassSelector = classId !== 'all' ? CLASS_ID_LABEL_MAP[classId] || '' : '';
+    return (
+      fromClassSelector
+      || teacherClassName
+      || requirementsData?.className
+      || ''
+    ).trim();
+  }, [classId, requirementsData?.className, teacherClassName]);
+
+  const autoSelectableStudents = useMemo(() => {
+    const classKey = normalizeClassKey(activeTargetClassName);
+    if (!classKey) return [] as LocalUser[];
+
+    return localStudents
+      .filter((user) => normalizeClassKey(user.className) === classKey)
+      .slice()
+      .sort((a, b) => a.userId.localeCompare(b.userId));
+  }, [activeTargetClassName, localStudents]);
 
   const normalizedOptions = useMemo(
     () => draft.options.map((option) => option.trim()).filter(Boolean),
@@ -319,7 +347,7 @@ export default function TeacherRequirementsPage() {
     setRecordsError(null);
 
     try {
-      const response = await fetchTeacherAssignments({ limit: 300 });
+      const response = await fetchTeacherAssignments({ limit: 300, includeAll: true });
       const list = (response.events || [])
         .map(toHistoryRecord)
         .filter((item): item is AssignmentHistoryRecord => Boolean(item))
@@ -341,6 +369,10 @@ export default function TeacherRequirementsPage() {
     setTeacherName(activeUser?.name || '教师');
     setTeacherClassName(activeUser?.className || '');
   }, []);
+
+  useEffect(() => {
+    setLocalStudents(listUsers().filter((user) => user.role === 'student'));
+  }, [teacherUserId]);
 
   useEffect(() => {
     if (!teacherUserId || typeof window === 'undefined') return;
@@ -451,6 +483,33 @@ export default function TeacherRequirementsPage() {
     setSendResult({
       type: 'success',
       message: `已载入 ${record.assignmentId} 的 v${record.version}。再次发送将自动生成 v${record.version + 1}。`,
+    });
+  };
+
+  const autoFillTargetsByClass = () => {
+    if (!activeTargetClassName) {
+      setSendResult({
+        type: 'warning',
+        message: '未识别当前班级，请先设置教师班级或选择班级后再自动填充。',
+      });
+      return;
+    }
+
+    if (autoSelectableStudents.length === 0) {
+      setSendResult({
+        type: 'warning',
+        message: `未找到班级“${activeTargetClassName}”的本地学生账号，请先在当前浏览器登录学生账号。`,
+      });
+      return;
+    }
+
+    setDraft((prev) => ({
+      ...prev,
+      targetUserIds: autoSelectableStudents.map((user) => user.userId).join(', '),
+    }));
+    setSendResult({
+      type: 'success',
+      message: `已自动填充班级“${activeTargetClassName}”学生 ${autoSelectableStudents.length} 人。`,
     });
   };
 
@@ -681,7 +740,15 @@ export default function TeacherRequirementsPage() {
 
             <div className="space-y-4 rounded-xl border border-border/70 bg-muted/30 p-4">
               <div className="space-y-2">
-                <Label htmlFor="target-user-ids">发送目标（学生 userId，逗号/换行分隔）</Label>
+                <div className="flex items-center justify-between gap-2">
+                  <Label htmlFor="target-user-ids">发送目标（学生 userId，逗号/换行分隔）</Label>
+                  <Button type="button" variant="outline" size="sm" onClick={autoFillTargetsByClass} disabled={isSending}>
+                    自动填充班级学生
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  当前班级：{activeTargetClassName || '未识别'} · 可自动匹配 {autoSelectableStudents.length} 人
+                </p>
                 <Textarea
                   id="target-user-ids"
                   value={draft.targetUserIds}

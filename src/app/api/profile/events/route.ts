@@ -3,18 +3,26 @@ import type { UserEventDTO, UserEventType } from '@/lib/api/types';
 
 const eventStore: UserEventDTO[] = [];
 
-const getUserId = (request: NextRequest) => {
-  const headerId = request.headers.get('x-user-id');
-  if (headerId) return headerId;
-  const { searchParams } = new URL(request.url);
-  return searchParams.get('userId');
-};
-
 const getQueryValue = (searchParams: URLSearchParams, key: string) => {
   const raw = searchParams.get(key);
   if (!raw) return null;
   const value = raw.trim();
   return value.length > 0 ? value : null;
+};
+
+const getUserId = (request: NextRequest) => {
+  const { searchParams } = new URL(request.url);
+  if (searchParams.get('includeAll') === '1') {
+    return null;
+  }
+
+  const queryUserId = getQueryValue(searchParams, 'userId');
+  if (queryUserId) return queryUserId;
+
+  const headerId = request.headers.get('x-user-id');
+  if (!headerId) return null;
+  const normalizedHeaderId = headerId.trim();
+  return normalizedHeaderId.length > 0 ? normalizedHeaderId : null;
 };
 
 const parseLimit = (value: string | null) => {
