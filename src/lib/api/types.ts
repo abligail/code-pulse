@@ -50,7 +50,8 @@ export type UserEventType =
   | 'practice_submit'
   | 'review_run'
   | 'quiz_submit'
-  | 'knowledge_card_open';
+  | 'knowledge_card_open'
+  | 'teacher_assignment';
 
 export interface UserEventDTO {
   eventId: string;

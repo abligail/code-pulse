@@ -8,6 +8,8 @@ import { PageHeader, PageHeaderDescription, PageHeaderHeading, PageHeaderTitle }
 import { PageState } from '@/components/ui/page-state';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { getActiveUser } from '@/lib/auth/session';
+import { fetchUserEvents } from '@/lib/api/events';
+import type { UserEventDTO } from '@/lib/api/types';
 import { readQuizHistoryEntries, QUIZ_HISTORY_EVENT, getQuizHistoryStorageKey, type QuizHistoryEntry } from '@/lib/storage/quiz-history';
 
 const preferenceLabelMap: Record<string, string> = {
@@ -43,6 +45,182 @@ const formatDateTime = (value?: string | null) => {
   });
 };
 
+const REVIEW_MODES = ['syntax', 'style', 'logic'] as const;
+type ReviewMode = typeof REVIEW_MODES[number];
+
+const reviewModeLabelMap: Record<ReviewMode, string> = {
+  syntax: '语法',
+  style: '风格',
+  logic: '逻辑',
+};
+
+interface ReviewBranchSummary {
+  mode: ReviewMode;
+  issueCount: number;
+  highestSeverity: number;
+  syncErrors: number;
+  occurredAt: string;
+}
+
+interface ReviewRunSummary {
+  success: boolean | null;
+  errorType: string | null;
+  totalTime: string | null;
+  exitCode: number | null;
+  occurredAt: string;
+}
+
+interface ReviewRoundSummary {
+  roundId: string;
+  roundLabel: string;
+  isLegacy: boolean;
+  latestAt: string;
+  run: ReviewRunSummary | null;
+  branches: Partial<Record<ReviewMode, ReviewBranchSummary>>;
+  issueCount: number;
+  highestSeverity: number;
+  syncErrors: number;
+  totalEvents: number;
+}
+
+const toTimestamp = (value?: string | null) => {
+  if (!value) return 0;
+  const parsed = new Date(value).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+const asRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+
+const toNumber = (value: unknown, fallback = 0) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+};
+
+const toNumberOrNull = (value: unknown) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+};
+
+const toStringOrNull = (value: unknown) => {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  return null;
+};
+
+const toBooleanOrNull = (value: unknown) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+  }
+  return null;
+};
+
+const toReviewMode = (value: unknown): ReviewMode | null => {
+  if (value === 'syntax' || value === 'style' || value === 'logic') {
+    return value;
+  }
+  return null;
+};
+
+const aggregateReviewRounds = (events: UserEventDTO[]): ReviewRoundSummary[] => {
+  const roundMap = new Map<string, {
+    roundId: string;
+    roundLabel: string;
+    isLegacy: boolean;
+    latestAt: string;
+    run: ReviewRunSummary | null;
+    branches: Partial<Record<ReviewMode, ReviewBranchSummary>>;
+    totalEvents: number;
+  }>();
+
+  events.forEach((event) => {
+    const rawRoundId = typeof event.roundId === 'string' ? event.roundId.trim() : '';
+    const isLegacy = rawRoundId.length === 0;
+    const roundId = isLegacy ? 'legacy' : rawRoundId;
+    const roundLabel = isLegacy ? 'legacy' : rawRoundId;
+
+    let round = roundMap.get(roundId);
+    if (!round) {
+      round = {
+        roundId,
+        roundLabel,
+        isLegacy,
+        latestAt: event.occurredAt,
+        run: null,
+        branches: {},
+        totalEvents: 0,
+      };
+      roundMap.set(roundId, round);
+    }
+
+    round.totalEvents += 1;
+    if (toTimestamp(event.occurredAt) > toTimestamp(round.latestAt)) {
+      round.latestAt = event.occurredAt;
+    }
+
+    const metrics = asRecord(event.metrics);
+    const mode = toReviewMode(metrics.mode);
+    if (mode) {
+      const candidate: ReviewBranchSummary = {
+        mode,
+        issueCount: toNumber(metrics.issueCount),
+        highestSeverity: toNumber(metrics.highestSeverity),
+        syncErrors: toNumber(metrics.syncErrors),
+        occurredAt: event.occurredAt,
+      };
+      const previous = round.branches[mode];
+      if (!previous || toTimestamp(candidate.occurredAt) >= toTimestamp(previous.occurredAt)) {
+        round.branches[mode] = candidate;
+      }
+      return;
+    }
+
+    const candidateRun: ReviewRunSummary = {
+      success: toBooleanOrNull(metrics.success),
+      errorType: toStringOrNull(metrics.errorType),
+      totalTime: toStringOrNull(metrics.totalTime),
+      exitCode: toNumberOrNull(metrics.exitCode),
+      occurredAt: event.occurredAt,
+    };
+
+    if (!round.run || toTimestamp(candidateRun.occurredAt) >= toTimestamp(round.run.occurredAt)) {
+      round.run = candidateRun;
+    }
+  });
+
+  return Array.from(roundMap.values())
+    .map((round) => {
+      const branchList = REVIEW_MODES
+        .map((mode) => round.branches[mode])
+        .filter((item): item is ReviewBranchSummary => Boolean(item));
+      return {
+        roundId: round.roundId,
+        roundLabel: round.roundLabel,
+        isLegacy: round.isLegacy,
+        latestAt: round.latestAt,
+        run: round.run,
+        branches: round.branches,
+        issueCount: branchList.reduce((sum, branch) => sum + branch.issueCount, 0),
+        highestSeverity: branchList.reduce((max, branch) => Math.max(max, branch.highestSeverity), 0),
+        syncErrors: branchList.reduce((sum, branch) => sum + branch.syncErrors, 0),
+        totalEvents: round.totalEvents,
+      };
+    })
+    .sort((a, b) => toTimestamp(b.latestAt) - toTimestamp(a.latestAt));
+};
+
 interface WeakKnowledgePoint {
   knowledge_id: string;
   knowledge_name: string;
@@ -66,6 +244,9 @@ export default function ReportPage() {
   const [profile, setProfile] = useState<UserProfileResponse | null>(null);
   const [profileLoading, setProfileLoading] = useState(true);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const [reviewRounds, setReviewRounds] = useState<ReviewRoundSummary[]>([]);
+  const [reviewLoading, setReviewLoading] = useState(true);
+  const [reviewError, setReviewError] = useState<string | null>(null);
   const [quizHistory, setQuizHistory] = useState<QuizHistoryEntry[]>([]);
 
   const loadProfile = useCallback(async () => {
@@ -99,9 +280,31 @@ export default function ReportPage() {
     setQuizHistory(readQuizHistoryEntries(userId));
   }, []);
 
+  const loadReviewHistory = useCallback(async () => {
+    setReviewLoading(true);
+    setReviewError(null);
+    try {
+      const userId = getActiveUser()?.userId;
+      const response = await fetchUserEvents({
+        limit: 200,
+        eventType: 'review_run',
+        source: 'student/review',
+        userId,
+      });
+      setReviewRounds(aggregateReviewRounds(response.events ?? []));
+    } catch (error) {
+      console.error('Failed to load review history', error);
+      setReviewRounds([]);
+      setReviewError('代码评审记录加载失败，请稍后重试。');
+    } finally {
+      setReviewLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void loadProfile();
-  }, [loadProfile]);
+    void loadReviewHistory();
+  }, [loadProfile, loadReviewHistory]);
 
   useEffect(() => {
     syncQuizHistory();
@@ -271,6 +474,132 @@ export default function ReportPage() {
                   </section>
                 </div>
               </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <CardTitle>代码评审记录</CardTitle>
+              <CardDescription>展示来自代码评审页的运行摘要、三分支状态与聚合统计</CardDescription>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => void loadReviewHistory()} disabled={reviewLoading}>
+              刷新评审记录
+            </Button>
+          </CardHeader>
+          <CardContent>
+            {reviewLoading ? (
+              <PageState
+                variant="loading"
+                size="sm"
+                className="border-0 bg-transparent"
+                description="正在同步代码评审记录..."
+              />
+            ) : reviewError ? (
+              <PageState
+                variant="error"
+                size="sm"
+                className="border-0 bg-transparent"
+                title="代码评审记录获取失败"
+                description={reviewError}
+                action={(
+                  <Button variant="outline" size="sm" onClick={() => void loadReviewHistory()}>
+                    重试
+                  </Button>
+                )}
+              />
+            ) : reviewRounds.length === 0 ? (
+              <PageState
+                variant="empty"
+                size="sm"
+                className="border-0 bg-transparent"
+                title="暂无代码评审记录"
+                description="请先在代码评审页完成一次运行。"
+              />
+            ) : (
+              <Accordion type="single" collapsible className="divide-y divide-border/60 rounded-2xl border border-border/70">
+                {reviewRounds.map((round) => {
+                  const completedBranches = REVIEW_MODES.reduce((count, mode) => count + (round.branches[mode] ? 1 : 0), 0);
+                  const runStatusLabel = !round.run || round.run.success === null
+                    ? '运行信息缺失'
+                    : round.run.success
+                      ? '运行成功'
+                      : `运行失败${round.run.errorType ? ` · ${round.run.errorType}` : ''}`;
+                  const runStatusTone = !round.run || round.run.success === null
+                    ? 'text-muted-foreground'
+                    : round.run.success
+                      ? 'text-emerald-600'
+                      : 'text-rose-600';
+
+                  return (
+                    <AccordionItem key={round.roundId} value={round.roundId} className="px-4 py-2">
+                      <AccordionTrigger className="text-left">
+                        <div className="flex flex-1 flex-col gap-1 text-left">
+                          <span className="font-medium text-foreground">
+                            {round.isLegacy ? '历史记录（legacy）' : `轮次 ${round.roundLabel}`}
+                          </span>
+                          <span className="text-xs text-muted-foreground">
+                            {formatDateTime(round.latestAt)} · {completedBranches}/3 分支 · {round.totalEvents} 条事件
+                          </span>
+                        </div>
+                        <Badge variant="outline" className={`text-[11px] ${runStatusTone}`}>
+                          {runStatusLabel}
+                        </Badge>
+                      </AccordionTrigger>
+                      <AccordionContent className="space-y-4 pt-2">
+                        <div className="grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                          <div className="rounded-lg border border-border/60 bg-muted/40 px-3 py-2">
+                            <div className="text-muted-foreground">运行结果</div>
+                            <div className="mt-1 font-medium text-foreground">{runStatusLabel}</div>
+                          </div>
+                          <div className="rounded-lg border border-border/60 bg-muted/40 px-3 py-2">
+                            <div className="text-muted-foreground">总耗时</div>
+                            <div className="mt-1 font-medium text-foreground">{round.run?.totalTime ?? '—'}</div>
+                          </div>
+                          <div className="rounded-lg border border-border/60 bg-muted/40 px-3 py-2">
+                            <div className="text-muted-foreground">退出码</div>
+                            <div className="mt-1 font-medium text-foreground">{round.run?.exitCode ?? '—'}</div>
+                          </div>
+                          <div className="rounded-lg border border-border/60 bg-muted/40 px-3 py-2">
+                            <div className="text-muted-foreground">聚合统计</div>
+                            <div className="mt-1 font-medium text-foreground">
+                              issue={round.issueCount} / severity={round.highestSeverity} / syncErrors={round.syncErrors}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="grid gap-2 sm:grid-cols-3">
+                          {REVIEW_MODES.map((mode) => {
+                            const branch = round.branches[mode];
+                            return (
+                              <div
+                                key={`${round.roundId}-${mode}`}
+                                className={`rounded-xl border px-3 py-2 text-xs ${
+                                  branch
+                                    ? 'border-border/60 bg-background/70'
+                                    : 'border-dashed border-border/60 bg-muted/30 text-muted-foreground'
+                                }`}
+                              >
+                                <div className="font-medium">{reviewModeLabelMap[mode]}</div>
+                                {branch ? (
+                                  <div className="mt-1 space-y-1 text-muted-foreground">
+                                    <div>问题数: {branch.issueCount}</div>
+                                    <div>最高严重度: {branch.highestSeverity}</div>
+                                    <div>同步错误: {branch.syncErrors}</div>
+                                  </div>
+                                ) : (
+                                  <div className="mt-1">未返回</div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </AccordionContent>
+                    </AccordionItem>
+                  );
+                })}
+              </Accordion>
             )}
           </CardContent>
         </Card>
