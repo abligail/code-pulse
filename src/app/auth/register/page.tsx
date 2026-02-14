@@ -13,6 +13,7 @@ import { Badge } from '@/components/ui/badge';
 import { ClientIcon } from '@/components/client-icon';
 import { PageHeader, PageHeaderDescription, PageHeaderHeading, PageHeaderTitle } from '@/components/ui/page-header';
 import { generateUserId, setActiveUser, type UserRole } from '@/lib/auth/session';
+import { saveBasicUser } from '@/lib/api/users';
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -46,6 +47,13 @@ export default function RegisterPage() {
     };
 
     setActiveUser(user);
+    void saveBasicUser({
+      userId: user.userId,
+      name: user.name,
+      role: user.role,
+      className: user.className,
+      createdAt: user.createdAt,
+    });
     router.replace(role === 'teacher' ? '/teacher/dashboard' : '/student/chat');
   };
 

@@ -20,6 +20,7 @@ import {
   type UserProfileRecordDTO,
   type WeakKnowledgePointDTO,
 } from '@/lib/api/teacher';
+import { fetchUserBasics, type BasicUserDTO } from '@/lib/api/users';
 
 const CATEGORY_COLORS = ['#38bdf8', '#10b981', '#facc15', '#f472b6', '#a78bfa', '#fb923c'];
 const WORD_CLOUD_WIDTH = 420;
@@ -38,12 +39,9 @@ export default function TeacherDashboard() {
   const [profilesError, setProfilesError] = useState<string | null>(null);
   const [profileDialogOpen, setProfileDialogOpen] = useState(false);
   const [selectedProfile, setSelectedProfile] = useState<UserProfileRecordDTO | null>(null);
+  const [userBasics, setUserBasics] = useState<Record<string, BasicUserDTO>>({});
 
-  useEffect(() => {
-    fetchDashboardData();
-  }, [classId, timeRange]);
-
-  const fetchDashboardData = async () => {
+  const fetchDashboardData = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
@@ -56,17 +54,41 @@ export default function TeacherDashboard() {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [classId, timeRange]);
+
+  useEffect(() => {
+    void fetchDashboardData();
+  }, [fetchDashboardData]);
 
   const loadUserProfiles = useCallback(async () => {
     setProfilesLoading(true);
     setProfilesError(null);
     try {
       const response = await fetchAllUserProfiles({ onlyWeak: true });
-      setProfileUsers(response.users || []);
+      const users = response.users || [];
+      setProfileUsers(users);
+
+      const ids = Array.from(new Set(users.map((u) => u.user_id).filter((id): id is string => Boolean(id))));
+      if (ids.length > 0) {
+        try {
+          const basics = await fetchUserBasics(ids);
+          const map: Record<string, BasicUserDTO> = {};
+          (basics.users || []).forEach((item) => {
+            if (item.userId) {
+              map[item.userId] = item;
+            }
+          });
+          setUserBasics(map);
+        } catch (error) {
+          console.error('Failed to fetch user basics:', error);
+        }
+      } else {
+        setUserBasics({});
+      }
     } catch (error) {
       console.error('Failed to fetch user profiles:', error);
       setProfileUsers([]);
+      setUserBasics({});
       setProfilesError('学生画像数据获取失败，请稍后重试。');
     } finally {
       setProfilesLoading(false);
@@ -97,15 +119,21 @@ export default function TeacherDashboard() {
     return Number.isFinite(parsed) ? parsed.toString() : String(value);
   };
 
+  const resolveUserName = useCallback(
+    (user: UserProfileRecordDTO) => userBasics[user.user_id]?.name || user.user_name || '未命名学生',
+    [userBasics]
+  );
+
   const enrichedWeakPoints = useMemo<EnrichedWeakPoint[]>(() => {
-    return profileUsers.flatMap((user) =>
-      (user.weak_knowledge ?? []).map((point) => ({
+    return profileUsers.flatMap((user) => {
+      const displayName = userBasics[user.user_id]?.name || user.user_name;
+      return (user.weak_knowledge ?? []).map((point) => ({
         ...point,
         userId: user.user_id,
-        userName: user.user_name,
-      }))
-    );
-  }, [profileUsers]);
+        userName: displayName,
+      }));
+    });
+  }, [profileUsers, userBasics]);
 
   const totalWeakPoints = enrichedWeakPoints.length;
   const averageWeakPerUser = profileUsers.length > 0 ? (totalWeakPoints / profileUsers.length).toFixed(1) : '0.0';
@@ -297,6 +325,7 @@ export default function TeacherDashboard() {
           user,
           weakCount,
           avgWeakScore,
+          displayName: resolveUserName(user),
         };
       })
       .sort((a, b) => {
@@ -304,7 +333,7 @@ export default function TeacherDashboard() {
         return (b.avgWeakScore ?? 0) - (a.avgWeakScore ?? 0);
       })
       .slice(0, 8);
-  }, [profileUsers]);
+  }, [profileUsers, resolveUserName]);
 
   const latestProfileUpdate = useMemo(() => {
     const timestamps = profileUsers
@@ -776,13 +805,13 @@ export default function TeacherDashboard() {
                           <p className="mt-6 text-sm text-muted-foreground">暂无需要预警的学生。</p>
                         ) : (
                           <div className="mt-4 space-y-3">
-                            {userRanking.map(({ user, weakCount, avgWeakScore }) => (
+                            {userRanking.map(({ user, weakCount, avgWeakScore, displayName }) => (
                               <div
                                 key={user.user_id}
                                 className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/60 bg-muted/30 px-3 py-2 text-sm"
                               >
                                 <div>
-                                  <p className="font-semibold">{user.user_name || '未命名学生'}</p>
+                                  <p className="font-semibold">{displayName}</p>
                                   <p className="text-xs text-muted-foreground">{user.user_id}</p>
                                 </div>
                                 <div className="text-right">
@@ -853,7 +882,7 @@ export default function TeacherDashboard() {
                               return (
                                 <TableRow key={profile.user_id}>
                                   <TableCell>
-                                    <p className="font-medium">{profile.user_name || '未命名学生'}</p>
+                                    <p className="font-medium">{resolveUserName(profile)}</p>
                                     <button
                                       className="text-xs text-primary underline-offset-2 hover:underline"
                                       onClick={() => handleSelectProfile(profile)}
@@ -934,7 +963,7 @@ export default function TeacherDashboard() {
             <DialogTitle>学生薄弱点画像</DialogTitle>
             <DialogDescription>
               {selectedProfile
-                ? `${selectedProfile.user_name || '未命名学生'} · ${selectedProfile.user_id}`
+                ? `${resolveUserName(selectedProfile)} · ${selectedProfile.user_id}`
                 : '未选择学生'}
             </DialogDescription>
           </DialogHeader>
