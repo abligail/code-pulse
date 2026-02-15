@@ -112,6 +112,10 @@ export interface SetAnswerResponse {
   profileUpdateTime: string;
 }
 
+export interface PracticeAnalysisResponse {
+  analysis: string;
+}
+
 const asString = (value: unknown, fallback = '') => {
   if (typeof value !== 'string') return fallback;
   const text = value.trim();
@@ -205,6 +209,7 @@ export const fetchSinglePracticeQuestion = async (
 export const submitSinglePracticeAnswer = async (payload: {
   question_id: string;
   selected_option: ChoiceOption;
+  '答案解析'?: string;
 }) => {
   const raw = await apiPost<RawSingleAnswerResponse>('/api/practice/answer', payload);
   return normalizeSingleAnswerResponse(raw);
@@ -216,8 +221,15 @@ export const fetchPracticeQuestionSet = async (payload: QuestionSetRequest = {})
 };
 
 export const submitPracticeSetAnswers = async (payload: {
-  answers: Array<{ question_id: string; selected_option: ChoiceOption }>;
+  answers: Array<{ question_id: string; selected_option: ChoiceOption; '答案解析'?: string }>;
 }) => {
   const raw = await apiPost<RawSetAnswerResponse>('/api/practice/set/answer', payload);
   return normalizeSetAnswerResponse(raw);
 };
+
+export const generatePracticeAnalysis = (payload: {
+  mode: 'single' | 'set';
+  payload: unknown;
+  user_reply?: string;
+  user_id?: string;
+}) => apiPost<PracticeAnalysisResponse>('/api/practice/analysis', payload);

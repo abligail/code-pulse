@@ -20,6 +20,7 @@ import {
 import { getActiveUser } from '@/lib/auth/session';
 import {
   fetchSinglePracticeQuestion,
+  generatePracticeAnalysis,
   submitSinglePracticeAnswer,
   type ChoiceOption,
   type PracticeQuestion,
@@ -222,6 +223,9 @@ export default function PracticePage() {
   const [zpdApplied, setZpdApplied] = useState(false);
   const [selectedOption, setSelectedOption] = useState<ChoiceOption | null>(null);
   const [answerResult, setAnswerResult] = useState<SingleAnswerResponse | null>(null);
+  const [analysisText, setAnalysisText] = useState('');
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [isLoadingQuestion, setIsLoadingQuestion] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -436,6 +440,9 @@ export default function PracticePage() {
     setIsLoadingQuestion(true);
     setError(null);
     setAnswerResult(null);
+    setAnalysisText('');
+    setAnalysisError(null);
+    setAnalysisLoading(false);
     setSelectedOption(null);
     try {
       const data = await fetchSinglePracticeQuestion(strategy);
@@ -457,10 +464,37 @@ export default function PracticePage() {
     if (!question || !selectedOption || answerResult) return;
     setIsSubmitting(true);
     setError(null);
+    setAnalysisLoading(true);
+    setAnalysisError(null);
+    setAnalysisText('');
     try {
+      let analysisContent = '';
+      try {
+        const userId = getActiveUser()?.userId || '';
+        const analysis = await generatePracticeAnalysis({
+          mode: 'single',
+          user_id: userId || undefined,
+          payload: {
+            strategy,
+            question_id: question.id,
+            question_type: question.type,
+            question_stem: question.stem,
+            options: question.options,
+            knowledge_points: question.knowledgePoints,
+            selected_option: selectedOption,
+          },
+          user_reply: `选择了选项 ${selectedOption}`,
+        });
+        analysisContent = analysis.analysis?.trim() || '';
+        setAnalysisText(analysisContent);
+      } catch (analysisErr) {
+        console.error('Failed to generate single-question analysis', analysisErr);
+        setAnalysisError('解析生成失败，请稍后重试。');
+      }
       const data = await submitSinglePracticeAnswer({
         question_id: question.id,
         selected_option: selectedOption,
+        '答案解析': analysisContent || undefined,
       });
       setAnswerResult(data);
       void logUserEvent({
@@ -473,12 +507,14 @@ export default function PracticePage() {
           correctOption: data.correctOption,
           isCorrect: data.isCorrect,
           knowledgePoints: question.knowledgePoints,
+          hasAnalysis: Boolean(analysisContent),
         },
       });
     } catch (submitError) {
       console.error('Failed to submit single answer', submitError);
       setError('提交答案失败，请稍后重试。');
     } finally {
+      setAnalysisLoading(false);
       setIsSubmitting(false);
     }
   };
@@ -842,6 +878,19 @@ export default function PracticePage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-2">
+              <p className="text-sm font-medium">题目解析</p>
+              {analysisLoading ? (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  正在生成解析...
+                </div>
+              ) : analysisError ? (
+                <p className="text-sm text-destructive">{analysisError}</p>
+              ) : analysisText ? (
+                <p className="whitespace-pre-wrap text-sm text-foreground">{analysisText}</p>
+              ) : (
+                <p className="text-sm text-muted-foreground">暂无解析内容。</p>
+              )}
               <p className="text-sm font-medium">画像掌握度更新</p>
               {Object.keys(answerResult.updatedKcMastery).length === 0 ? (
                 <p className="text-sm text-muted-foreground">后端未返回知识点掌握度明细。</p>

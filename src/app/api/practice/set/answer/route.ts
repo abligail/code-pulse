@@ -14,13 +14,18 @@ export async function POST(request: Request) {
       const answer = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
       const questionId = readString(answer.question_id);
       const selectedOption = readOption(answer.selected_option);
+      const answerAnalysis = readString(answer['答案解析']);
       if (!questionId || !selectedOption) return null;
-      return {
+      const payload: Record<string, unknown> = {
         question_id: questionId,
         selected_option: selectedOption,
       };
+      if (answerAnalysis) {
+        payload['答案解析'] = answerAnalysis;
+      }
+      return payload;
     })
-    .filter((item): item is { question_id: string; selected_option: 'A' | 'B' | 'C' | 'D' } => Boolean(item));
+    .filter((item): item is Record<string, unknown> => Boolean(item));
 
   if (!userId || answers.length === 0) {
     return NextResponse.json(
@@ -34,4 +39,3 @@ export async function POST(request: Request) {
     answers,
   });
 }
-

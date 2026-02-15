@@ -9,6 +9,7 @@ export async function POST(request: Request) {
   const userId = readUserId(request, body.user_id);
   const questionId = readString(body.question_id);
   const selectedOption = readOption(body.selected_option);
+  const answerAnalysis = readString(body['答案解析']);
 
   if (!userId || !questionId || !selectedOption) {
     return NextResponse.json(
@@ -17,10 +18,14 @@ export async function POST(request: Request) {
     );
   }
 
-  return proxyPost('/questions/answer', {
+  const payload: Record<string, unknown> = {
     user_id: userId,
     question_id: questionId,
     selected_option: selectedOption,
-  });
-}
+  };
+  if (answerAnalysis) {
+    payload['答案解析'] = answerAnalysis;
+  }
 
+  return proxyPost('/questions/answer', payload);
+}

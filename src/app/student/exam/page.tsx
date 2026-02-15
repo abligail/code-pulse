@@ -12,11 +12,13 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { logUserEvent } from '@/lib/api/events';
 import {
   fetchPracticeQuestionSet,
+  generatePracticeAnalysis,
   submitPracticeSetAnswers,
   type ChoiceOption,
   type PracticeQuestion,
   type SetAnswerResponse,
 } from '@/lib/api/practice';
+import { getActiveUser } from '@/lib/auth/session';
 
 const OPTION_ORDER: ChoiceOption[] = ['A', 'B', 'C', 'D'];
 
@@ -26,6 +28,9 @@ export default function ExamPage() {
   const [zpdApplied, setZpdApplied] = useState(false);
   const [answers, setAnswers] = useState<Record<string, ChoiceOption>>({});
   const [result, setResult] = useState<SetAnswerResponse | null>(null);
+  const [analysisText, setAnalysisText] = useState('');
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [isLoadingSet, setIsLoadingSet] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +47,9 @@ export default function ExamPage() {
     setIsLoadingSet(true);
     setError(null);
     setResult(null);
+    setAnalysisText('');
+    setAnalysisError(null);
+    setAnalysisLoading(false);
     setAnswers({});
     try {
       const count = Number.parseInt(countInput, 10);
@@ -78,8 +86,40 @@ export default function ExamPage() {
 
     setIsSubmitting(true);
     setError(null);
+    setAnalysisLoading(true);
+    setAnalysisError(null);
+    setAnalysisText('');
     try {
-      const data = await submitPracticeSetAnswers({ answers: payloadAnswers });
+      let analysisContent = '';
+      try {
+        const userId = getActiveUser()?.userId || '';
+        const analysis = await generatePracticeAnalysis({
+          mode: 'set',
+          user_id: userId || undefined,
+          payload: {
+            questions: questions.map((question) => ({
+              question_id: question.id,
+              question_type: question.type,
+              question_stem: question.stem,
+              options: question.options,
+              knowledge_points: question.knowledgePoints,
+              selected_option: answers[question.id] ?? '',
+            })),
+          },
+          user_reply: '学生已完成整套题作答。',
+        });
+        analysisContent = analysis.analysis?.trim() || '';
+        setAnalysisText(analysisContent);
+      } catch (analysisErr) {
+        console.error('Failed to generate set analysis', analysisErr);
+        setAnalysisError('整卷解析生成失败，请稍后重试。');
+      }
+      const data = await submitPracticeSetAnswers({
+        answers: payloadAnswers.map((item) => ({
+          ...item,
+          '答案解析': analysisContent || undefined,
+        })),
+      });
       setResult(data);
       const correctCount = data.results.filter((item) => item.isCorrect).length;
       void logUserEvent({
@@ -89,12 +129,14 @@ export default function ExamPage() {
           total: data.results.length,
           correct: correctCount,
           accuracy: data.results.length > 0 ? correctCount / data.results.length : 0,
+          hasAnalysis: Boolean(analysisContent),
         },
       });
     } catch (submitError) {
       console.error('Failed to submit exam set', submitError);
       setError('提交试卷失败，请稍后重试。');
     } finally {
+      setAnalysisLoading(false);
       setIsSubmitting(false);
     }
   };
@@ -257,6 +299,19 @@ export default function ExamPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-2">
+              <p className="text-sm font-medium">整卷解析</p>
+              {analysisLoading ? (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  正在生成整卷解析...
+                </div>
+              ) : analysisError ? (
+                <p className="text-sm text-destructive">{analysisError}</p>
+              ) : analysisText ? (
+                <p className="whitespace-pre-wrap text-sm text-foreground">{analysisText}</p>
+              ) : (
+                <p className="text-sm text-muted-foreground">暂无解析内容。</p>
+              )}
               <p className="text-sm font-medium">画像掌握度更新</p>
               {Object.keys(result.updatedKcMastery).length === 0 ? (
                 <p className="text-sm text-muted-foreground">后端未返回知识点掌握度明细。</p>
@@ -280,4 +335,3 @@ export default function ExamPage() {
     </div>
   );
 }
-

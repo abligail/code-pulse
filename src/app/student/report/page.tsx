@@ -240,6 +240,52 @@ interface UserProfileResponse {
   weak_knowledge?: WeakKnowledgePoint[];
 }
 
+interface InteractionHistoryItem {
+  question_id: string;
+  knowledge_points: string[];
+  is_correct: boolean;
+  selected_option: string;
+  correct_option: string;
+  答案解析?: string;
+  answered_at: string;
+}
+
+interface InteractionHistoryResponse {
+  user_id: string;
+  interaction_history: InteractionHistoryItem[];
+}
+
+type PracticeRecordItem =
+  | { id: string; occurredAt: string; source: 'local'; local: QuizHistoryEntry }
+  | { id: string; occurredAt: string; source: 'backend'; backend: InteractionHistoryItem };
+
+const normalizeInteractionHistory = (raw: unknown): InteractionHistoryItem[] => {
+  const payload = asRecord(raw) as Partial<InteractionHistoryResponse>;
+  const list = Array.isArray(payload.interaction_history) ? payload.interaction_history : [];
+  return list.reduce<InteractionHistoryItem[]>((acc, item) => {
+    const row = asRecord(item);
+    const questionId = toStringOrNull(row.question_id);
+    const answeredAt = toStringOrNull(row.answered_at);
+    if (!questionId || !answeredAt) return acc;
+    const parsed: InteractionHistoryItem = {
+      question_id: questionId,
+      knowledge_points: Array.isArray(row.knowledge_points)
+        ? row.knowledge_points.map((entry) => String(entry)).filter(Boolean)
+        : [],
+      is_correct: Boolean(toBooleanOrNull(row.is_correct) ?? row.is_correct),
+      selected_option: toStringOrNull(row.selected_option) ?? '',
+      correct_option: toStringOrNull(row.correct_option) ?? '',
+      answered_at: answeredAt,
+    };
+    const analysis = toStringOrNull(row['答案解析']);
+    if (analysis) {
+      parsed['答案解析'] = analysis;
+    }
+    acc.push(parsed);
+    return acc;
+  }, []);
+};
+
 export default function ReportPage() {
   const [profile, setProfile] = useState<UserProfileResponse | null>(null);
   const [profileLoading, setProfileLoading] = useState(true);
@@ -248,6 +294,9 @@ export default function ReportPage() {
   const [reviewLoading, setReviewLoading] = useState(true);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [quizHistory, setQuizHistory] = useState<QuizHistoryEntry[]>([]);
+  const [interactionHistory, setInteractionHistory] = useState<InteractionHistoryItem[]>([]);
+  const [interactionLoading, setInteractionLoading] = useState(true);
+  const [interactionError, setInteractionError] = useState<string | null>(null);
 
   const loadProfile = useCallback(async () => {
     setProfileLoading(true);
@@ -301,10 +350,33 @@ export default function ReportPage() {
     }
   }, []);
 
+  const loadInteractionHistory = useCallback(async () => {
+    setInteractionLoading(true);
+    setInteractionError(null);
+    try {
+      const userId = getActiveUser()?.userId ?? 'guest';
+      const response = await fetch(`/api/user-profile/interaction-history?userId=${encodeURIComponent(userId)}`, {
+        cache: 'no-store',
+      });
+      if (!response.ok) {
+        throw new Error(`Interaction history request failed: ${response.status}`);
+      }
+      const raw = (await response.json()) as unknown;
+      setInteractionHistory(normalizeInteractionHistory(raw));
+    } catch (error) {
+      console.error('Failed to load interaction history', error);
+      setInteractionHistory([]);
+      setInteractionError('后端做题记录加载失败，请稍后重试。');
+    } finally {
+      setInteractionLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void loadProfile();
     void loadReviewHistory();
-  }, [loadProfile, loadReviewHistory]);
+    void loadInteractionHistory();
+  }, [loadProfile, loadReviewHistory, loadInteractionHistory]);
 
   useEffect(() => {
     syncQuizHistory();
@@ -336,6 +408,23 @@ export default function ReportPage() {
   const sortedQuizHistory = useMemo(
     () => quizHistory.slice().sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime()),
     [quizHistory]
+  );
+  const practiceRecords = useMemo<PracticeRecordItem[]>(
+    () => [
+      ...sortedQuizHistory.map((entry) => ({
+        id: `local-${entry.id}`,
+        occurredAt: entry.occurredAt,
+        source: 'local' as const,
+        local: entry,
+      })),
+      ...interactionHistory.map((entry, index) => ({
+        id: `backend-${entry.question_id}-${entry.answered_at}-${index}`,
+        occurredAt: entry.answered_at,
+        source: 'backend' as const,
+        backend: entry,
+      })),
+    ].sort((a, b) => toTimestamp(b.occurredAt) - toTimestamp(a.occurredAt)),
+    [sortedQuizHistory, interactionHistory]
   );
 
   return (
@@ -605,96 +694,183 @@ export default function ReportPage() {
         </Card>
 
         <Card>
-          <CardHeader>
-            <CardTitle>做题记录</CardTitle>
-            <CardDescription>聊天页薄弱点练习提交后自动入库（仅本地存储，不随刷新丢失）</CardDescription>
+          <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <CardTitle>做题记录</CardTitle>
+              <CardDescription>同时展示聊天页本地练习记录与后端 `interaction_history` 记录</CardDescription>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                syncQuizHistory();
+                void loadInteractionHistory();
+              }}
+              disabled={interactionLoading}
+            >
+              刷新做题记录
+            </Button>
           </CardHeader>
           <CardContent>
-            {sortedQuizHistory.length === 0 ? (
+            {interactionLoading && practiceRecords.length === 0 ? (
+              <PageState
+                variant="loading"
+                size="sm"
+                className="border-0 bg-transparent"
+                description="正在同步做题记录..."
+              />
+            ) : interactionError && practiceRecords.length === 0 ? (
+              <PageState
+                variant="error"
+                size="sm"
+                className="border-0 bg-transparent"
+                title="做题记录获取失败"
+                description={interactionError}
+                action={(
+                  <Button variant="outline" size="sm" onClick={() => void loadInteractionHistory()}>
+                    重试
+                  </Button>
+                )}
+              />
+            ) : practiceRecords.length === 0 ? (
               <PageState
                 variant="empty"
                 size="sm"
                 className="border-0 bg-transparent"
                 title="暂无做题记录"
-                description="在聊天界面提交一次薄弱点练习后即可在此查看题目与解析。"
+                description="提交练习或考试后可在此查看作答与解析。"
               />
             ) : (
-              <Accordion type="single" collapsible className="divide-y divide-border/60 rounded-2xl border border-border/70">
-                {sortedQuizHistory.map((entry) => (
-                  <AccordionItem key={entry.id} value={entry.id} className="px-4 py-2">
-                    <AccordionTrigger className="text-left">
-                      <div className="flex flex-1 flex-col gap-1 text-left">
-                        <span className="font-medium text-foreground">{entry.knowledgeName || '未命名练习'}</span>
-                        <span className="text-xs text-muted-foreground">
-                          {formatDateTime(entry.occurredAt)} · {entry.questions.length} 道题
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap gap-1">
-                        {entry.knowledgeCategory.map((category) => (
-                          <Badge key={`${entry.id}-${category}`} variant="outline" className="text-[11px]">
-                            {category}
-                          </Badge>
-                        ))}
-                      </div>
-                    </AccordionTrigger>
-                    <AccordionContent className="space-y-4 pt-2">
-                      <div className="rounded-xl border border-dashed border-border/60 bg-muted/40 px-4 py-3 text-sm leading-relaxed text-muted-foreground">
-                        {entry.review || '暂无解析记录'}
-                      </div>
-                      <div className="space-y-4">
-                        {entry.questions.map((question, index) => {
-                          const badgeTone =
-                            question.checkResult === 'correct'
-                              ? 'bg-emerald-500/15 text-emerald-600 border-emerald-500/30'
-                              : question.checkResult === 'wrong'
-                                ? 'bg-rose-500/15 text-rose-600 border-rose-500/30'
-                                : 'bg-muted text-muted-foreground border-border/60';
-                          const resultLabel =
-                            question.checkResult === 'correct' ? '正确' : question.checkResult === 'wrong' ? '错误' : '待判定';
-                          return (
-                            <div key={`${entry.id}-q${index}`} className="rounded-2xl border border-border/70 bg-card/80 p-4">
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <span className="text-sm font-semibold text-foreground">Q{index + 1} · {question.type}</span>
-                                <Badge variant="outline" className={`text-[11px] ${badgeTone}`}>
-                                  {resultLabel}
-                                </Badge>
-                              </div>
-                              <p className="mt-2 text-sm leading-relaxed text-foreground">{question.stem}</p>
-                              {question.options.length > 0 && (
-                                <ul className="mt-3 grid gap-2 sm:grid-cols-2">
-                                  {question.options.map((option, optIndex) => (
-                                    <li key={`${entry.id}-q${index}-opt${optIndex}`} className="rounded-lg border border-border/60 bg-background/60 px-3 py-2 text-xs leading-relaxed">
-                                      <span className="mr-2 font-semibold text-muted-foreground">{String.fromCharCode(65 + optIndex)}.</span>
-                                      {option}
-                                    </li>
-                                  ))}
-                                </ul>
-                              )}
-                              <dl className="mt-4 space-y-2 text-xs">
-                                <div className="flex items-center justify-between rounded-lg border border-border/60 bg-muted/40 px-3 py-2">
-                                  <span className="text-muted-foreground">你的作答</span>
-                                  <span className="text-foreground">{question.userAnswer || '未作答'}</span>
-                                </div>
-                                {question.referenceAnswer && (
-                                  <div className="flex items-center justify-between rounded-lg border border-border/60 bg-muted/40 px-3 py-2">
-                                    <span className="text-muted-foreground">参考答案</span>
-                                    <span className="text-foreground">{question.referenceAnswer}</span>
-                                  </div>
-                                )}
-                                {question.analysis && (
-                                  <div className="rounded-lg border border-border/60 bg-background/70 px-3 py-2 text-muted-foreground">
-                                    {question.analysis}
-                                  </div>
-                                )}
-                              </dl>
+              <>
+                {interactionError && (
+                  <div className="mb-3 rounded-lg border border-rose-300/60 bg-rose-50/60 px-3 py-2 text-sm text-rose-700">
+                    {interactionError}
+                  </div>
+                )}
+                <Accordion type="single" collapsible className="divide-y divide-border/60 rounded-2xl border border-border/70">
+                  {practiceRecords.map((record) => (
+                    <AccordionItem key={record.id} value={record.id} className="px-4 py-2">
+                      <AccordionTrigger className="text-left">
+                        {record.source === 'local' ? (
+                          <>
+                            <div className="flex flex-1 flex-col gap-1 text-left">
+                              <span className="font-medium text-foreground">{record.local.knowledgeName || '未命名练习'}</span>
+                              <span className="text-xs text-muted-foreground">
+                                {formatDateTime(record.local.occurredAt)} · {record.local.questions.length} 道题
+                              </span>
                             </div>
-                          );
-                        })}
-                      </div>
-                    </AccordionContent>
-                  </AccordionItem>
-                ))}
-              </Accordion>
+                            <div className="flex flex-wrap items-center gap-1">
+                              <Badge variant="secondary" className="text-[11px]">本地练习</Badge>
+                              {record.local.knowledgeCategory.map((category) => (
+                                <Badge key={`${record.id}-${category}`} variant="outline" className="text-[11px]">
+                                  {category}
+                                </Badge>
+                              ))}
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="flex flex-1 flex-col gap-1 text-left">
+                              <span className="font-medium text-foreground">题目 {record.backend.question_id}</span>
+                              <span className="text-xs text-muted-foreground">
+                                {formatDateTime(record.backend.answered_at)} · 后端作答记录
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1">
+                              <Badge variant="outline" className="text-[11px]">后端记录</Badge>
+                              <Badge variant={record.backend.is_correct ? 'secondary' : 'destructive'} className="text-[11px]">
+                                {record.backend.is_correct ? '正确' : '错误'}
+                              </Badge>
+                            </div>
+                          </>
+                        )}
+                      </AccordionTrigger>
+                      <AccordionContent className="space-y-4 pt-2">
+                        {record.source === 'local' ? (
+                          <>
+                            <div className="rounded-xl border border-dashed border-border/60 bg-muted/40 px-4 py-3 text-sm leading-relaxed text-muted-foreground">
+                              {record.local.review || '暂无解析记录'}
+                            </div>
+                            <div className="space-y-4">
+                              {record.local.questions.map((question, index) => {
+                                const badgeTone =
+                                  question.checkResult === 'correct'
+                                    ? 'bg-emerald-500/15 text-emerald-600 border-emerald-500/30'
+                                    : question.checkResult === 'wrong'
+                                      ? 'bg-rose-500/15 text-rose-600 border-rose-500/30'
+                                      : 'bg-muted text-muted-foreground border-border/60';
+                                const resultLabel =
+                                  question.checkResult === 'correct' ? '正确' : question.checkResult === 'wrong' ? '错误' : '待判定';
+                                return (
+                                  <div key={`${record.id}-q${index}`} className="rounded-2xl border border-border/70 bg-card/80 p-4">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <span className="text-sm font-semibold text-foreground">Q{index + 1} · {question.type}</span>
+                                      <Badge variant="outline" className={`text-[11px] ${badgeTone}`}>
+                                        {resultLabel}
+                                      </Badge>
+                                    </div>
+                                    <p className="mt-2 text-sm leading-relaxed text-foreground">{question.stem}</p>
+                                    {question.options.length > 0 && (
+                                      <ul className="mt-3 grid gap-2 sm:grid-cols-2">
+                                        {question.options.map((option, optIndex) => (
+                                          <li key={`${record.id}-q${index}-opt${optIndex}`} className="rounded-lg border border-border/60 bg-background/60 px-3 py-2 text-xs leading-relaxed">
+                                            <span className="mr-2 font-semibold text-muted-foreground">{String.fromCharCode(65 + optIndex)}.</span>
+                                            {option}
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    )}
+                                    <dl className="mt-4 space-y-2 text-xs">
+                                      <div className="flex items-center justify-between rounded-lg border border-border/60 bg-muted/40 px-3 py-2">
+                                        <span className="text-muted-foreground">你的作答</span>
+                                        <span className="text-foreground">{question.userAnswer || '未作答'}</span>
+                                      </div>
+                                      {question.referenceAnswer && (
+                                        <div className="flex items-center justify-between rounded-lg border border-border/60 bg-muted/40 px-3 py-2">
+                                          <span className="text-muted-foreground">参考答案</span>
+                                          <span className="text-foreground">{question.referenceAnswer}</span>
+                                        </div>
+                                      )}
+                                      {question.analysis && (
+                                        <div className="rounded-lg border border-border/60 bg-background/70 px-3 py-2 text-muted-foreground">
+                                          {question.analysis}
+                                        </div>
+                                      )}
+                                    </dl>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </>
+                        ) : (
+                          <div className="space-y-3">
+                            <div className="flex flex-wrap gap-2">
+                              {record.backend.knowledge_points.map((point) => (
+                                <Badge key={`${record.id}-${point}`} variant="secondary" className="text-[11px]">
+                                  {point}
+                                </Badge>
+                              ))}
+                            </div>
+                            <dl className="grid gap-2 text-xs sm:grid-cols-2">
+                              <div className="flex items-center justify-between rounded-lg border border-border/60 bg-muted/40 px-3 py-2">
+                                <span className="text-muted-foreground">你的作答</span>
+                                <span className="text-foreground">{record.backend.selected_option || '—'}</span>
+                              </div>
+                              <div className="flex items-center justify-between rounded-lg border border-border/60 bg-muted/40 px-3 py-2">
+                                <span className="text-muted-foreground">正确答案</span>
+                                <span className="text-foreground">{record.backend.correct_option || '—'}</span>
+                              </div>
+                            </dl>
+                            <div className="rounded-xl border border-dashed border-border/60 bg-muted/40 px-4 py-3 text-sm leading-relaxed text-muted-foreground">
+                              {record.backend.答案解析 || '暂无解析'}
+                            </div>
+                          </div>
+                        )}
+                      </AccordionContent>
+                    </AccordionItem>
+                  ))}
+                </Accordion>
+              </>
             )}
           </CardContent>
         </Card>
