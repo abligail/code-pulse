@@ -1,8 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ComponentPropsWithoutRef } from 'react';
 import { Send, Plus, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -32,6 +34,12 @@ interface AssistantCardItem {
   question?: string;
   relationship?: string;
   source?: string;
+}
+
+interface RecommendationLink {
+  title: string;
+  url: string;
+  description?: string;
 }
 
 interface StoredChatMessage {
@@ -208,6 +216,138 @@ const splitAnswers = (text: string): string[] => {
     .filter(Boolean);
 };
 
+const RECOMMENDATION_SECTION_LABEL = '【推荐学习网站】';
+const RECOMMENDATION_END_LABEL = '【薄弱点提醒】';
+const SECTION_BOUNDARY_REGEX = /【[^】]+】/;
+const RECOMMENDATION_ENTRY_REGEX = /(?:^|[\s。；;、])(?:\d+[\.\uFF0E、]?\s*)?([^：:\n]+?)[:：]\s*(https?:\/\/[^\s)）]+)(?:\s*[（(]([^（）()]+)[）)])?/g;
+
+const sanitizeRecommendationLine = (line: string) =>
+  line
+    .replace(/^[\d\.\uFF0E、,，\s-]+/, '')
+    .replace(/^[*-]\s*/, '')
+    .trim();
+
+const parseRecommendationLines = (lines: string[]): RecommendationLink[] => {
+  const items: RecommendationLink[] = [];
+  lines.forEach((line) => {
+    const normalized = sanitizeRecommendationLine(line);
+    if (!normalized) return;
+    const urlMatch = normalized.match(/https?:\/\/[^\s)）]+/i);
+    if (!urlMatch || urlMatch.index === undefined) return;
+    const url = urlMatch[0];
+    const beforeUrl = normalized.slice(0, urlMatch.index).replace(/[：:]\s*$/, '').trim();
+    const afterUrl = normalized.slice(urlMatch.index + url.length).trim();
+    let description = '';
+    const descMatch = afterUrl.match(/^[（(]([^（）()]+)[）)]/);
+    if (descMatch) {
+      description = descMatch[1].trim();
+    } else if (afterUrl) {
+      description = afterUrl.replace(/^[，,:：.。\s-]+/, '').replace(/[）)]$/, '').trim();
+    }
+    items.push({
+      title: beforeUrl || '推荐学习网站',
+      url,
+      description: description || undefined,
+    });
+  });
+  return items;
+};
+
+const parseRecommendationSection = (sectionBody: string): RecommendationLink[] => {
+  const items: RecommendationLink[] = [];
+  RECOMMENDATION_ENTRY_REGEX.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = RECOMMENDATION_ENTRY_REGEX.exec(sectionBody)) !== null) {
+    const rawTitle = match[1]?.trim();
+    const url = match[2]?.trim();
+    if (!rawTitle || !url) continue;
+    const normalizedTitle = rawTitle.replace(/^[\d\.\uFF0E、,，\s-]+/, '') || rawTitle;
+    const description = match[3]?.trim();
+    items.push({
+      title: normalizedTitle,
+      url,
+      description: description || undefined,
+    });
+  }
+  if (items.length > 0) return items;
+
+  const fallbackLines = sectionBody
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return parseRecommendationLines(fallbackLines);
+};
+
+const extractRecommendationsFromMessage = (
+  rawText?: string | null
+): { cleanedText: string; recommendations: RecommendationLink[] } => {
+  const text = typeof rawText === 'string' ? rawText : '';
+  const labelIndex = text.indexOf(RECOMMENDATION_SECTION_LABEL);
+  if (labelIndex < 0) {
+    return { cleanedText: text, recommendations: [] };
+  }
+  const sectionStart = labelIndex + RECOMMENDATION_SECTION_LABEL.length;
+  let sectionEnd = text.length;
+  const specificEndIndex = text.indexOf(RECOMMENDATION_END_LABEL, sectionStart);
+  if (specificEndIndex >= 0) {
+    sectionEnd = specificEndIndex;
+  } else {
+    const boundaryMatch = text.slice(sectionStart).match(SECTION_BOUNDARY_REGEX);
+    if (boundaryMatch?.index !== undefined) {
+      sectionEnd = sectionStart + boundaryMatch.index;
+    }
+  }
+  const sectionBody = text.slice(sectionStart, sectionEnd).trim();
+  const recommendations = parseRecommendationSection(sectionBody);
+  if (recommendations.length === 0) {
+    return { cleanedText: text, recommendations: [] };
+  }
+  const before = text.slice(0, labelIndex).trimEnd();
+  const after = text.slice(sectionEnd).trimStart();
+  const cleanedText = before && after ? `${before}\n\n${after}` : before || after;
+  return { cleanedText, recommendations };
+};
+
+type MarkdownCodeProps = ComponentPropsWithoutRef<'code'> & {
+  inline?: boolean;
+  node?: unknown;
+};
+
+const markdownComponents: Components = {
+  code({ inline, className, children, ...props }: MarkdownCodeProps) {
+    const content = String(children).replace(/\n$/, '');
+    if (inline) {
+      return (
+        <code
+          className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[0.9em] text-foreground"
+          {...props}
+        >
+          {content}
+        </code>
+      );
+    }
+    return (
+      <pre className="mt-3 overflow-x-auto rounded-2xl border border-border/60 bg-muted/90 p-4 font-mono text-[0.92em] leading-relaxed text-foreground shadow-inner">
+        <code className={className} {...props}>
+          {content}
+        </code>
+      </pre>
+    );
+  },
+  a({ children, ...props }) {
+    return (
+      <a
+        {...props}
+        target="_blank"
+        rel="noreferrer"
+        className="font-medium text-sky-400 underline decoration-dotted underline-offset-4 transition hover:text-sky-300"
+      >
+        {children}
+      </a>
+    );
+  },
+};
+
 export default function ChatPage() {
   const initialUserIdRef = useRef<string>(getCurrentUserId());
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -246,7 +386,7 @@ export default function ChatPage() {
       const updatedAt = new Date(session.updatedAt).getTime();
       return Number.isFinite(updatedAt) && now - updatedAt <= SESSION_RETENTION_MS;
     });
-  }, [SESSION_RETENTION_MS]);
+  }, []);
 
   // Load history from localStorage on mount
   useEffect(() => {
@@ -1233,45 +1373,57 @@ export default function ChatPage() {
 
             <ScrollArea className="relative min-h-0 flex-1 px-5 py-6 lg:px-6" viewportRef={scrollRef}>
               <div className="mx-auto max-w-3xl space-y-5 pb-10">
-                {messages.map((message, index) => (
-                  <div
-                    key={message.id}
-                    className={`motion-fade-up flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                    style={{ animationDelay: `${Math.min(index, 8) * 35}ms` }}
-                  >
-                    <div className="max-w-[84%]">
-                      <div
-                        className={`rounded-2xl px-4 py-3 text-sm shadow-[0_20px_30px_-22px_rgba(15,23,42,0.72)] ${
-                          message.role === 'user'
-                            ? 'rounded-br-md bg-[linear-gradient(135deg,rgb(37_99_235),rgb(14_116_144))] text-primary-foreground'
-                            : 'rounded-bl-md border border-border/70 bg-card/92 text-foreground'
-                        }`}
-                      >
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          className="prose prose-sm max-w-none text-foreground prose-p:leading-relaxed prose-pre:bg-muted prose-pre:text-foreground"
+                {messages.map((message, index) => {
+                  const { cleanedText, recommendations } = extractRecommendationsFromMessage(message.text);
+                  const trimmed = cleanedText.trim();
+                  let displayText = trimmed.length > 0 ? cleanedText : '';
+                  if (!displayText) {
+                    if (message.streaming) {
+                      displayText = '...';
+                    } else if (recommendations.length > 0) {
+                      displayText = '推荐站点已整理如下：';
+                    } else {
+                      displayText = message.text || '';
+                    }
+                  }
+                  return (
+                    <div
+                      key={message.id}
+                      className={`motion-fade-up flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                      style={{ animationDelay: `${Math.min(index, 8) * 35}ms` }}
+                    >
+                      <div className="max-w-[84%]">
+                        <div
+                          className={`rounded-2xl px-4 py-3 text-sm shadow-[0_20px_30px_-22px_rgba(15,23,42,0.72)] ${
+                            message.role === 'user'
+                              ? 'rounded-br-md bg-[linear-gradient(135deg,rgb(37_99_235),rgb(14_116_144))] text-primary-foreground'
+                              : 'rounded-bl-md border border-border/70 bg-card/92 text-foreground'
+                          }`}
                         >
-                          {message.text || (message.streaming ? '...' : '')}
-                        </ReactMarkdown>
-                        {message.streaming && (
-                          <div className="mt-2 text-xs text-muted-foreground">生成中...</div>
-                        )}
-                      </div>
-                      {message.cards && message.cards.length > 0 && !message.streaming && (
-                        <div className="mt-3">
-                          <KnowledgeGraph items={message.cards} onFollowUp={handleFollowUp} />
+                          <MarkdownMessage content={displayText} />
+                          {message.streaming && (
+                            <div className="mt-2 text-xs text-muted-foreground">生成中...</div>
+                          )}
                         </div>
-                      )}
-                      <p
-                        className={`mt-1 px-1 text-[11px] text-muted-foreground ${
-                          message.role === 'user' ? 'text-right' : 'text-left'
-                        }`}
-                      >
-                        {formatMessageTime(message.timestamp)}
-                      </p>
+                        {!message.streaming && recommendations.length > 0 && (
+                          <RecommendationLinks items={recommendations} />
+                        )}
+                        {message.cards && message.cards.length > 0 && !message.streaming && (
+                          <div className="mt-3">
+                            <KnowledgeGraph items={message.cards} onFollowUp={handleFollowUp} />
+                          </div>
+                        )}
+                        <p
+                          className={`mt-1 px-1 text-[11px] text-muted-foreground ${
+                            message.role === 'user' ? 'text-right' : 'text-left'
+                          }`}
+                        >
+                          {formatMessageTime(message.timestamp)}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
 
                 {isLoading && (
                   <div className="motion-fade-up flex justify-start">
@@ -1542,6 +1694,50 @@ export default function ChatPage() {
       </Dialog>
       </>
     );
+}
+
+function MarkdownMessage({ content }: { content: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={markdownComponents}
+      className="prose prose-sm max-w-none text-inherit prose-headings:text-inherit prose-strong:text-inherit prose-p:leading-relaxed prose-li:marker:text-muted-foreground"
+    >
+      {content}
+    </ReactMarkdown>
+  );
+}
+
+function RecommendationLinks({ items }: { items: RecommendationLink[] }) {
+  if (!items.length) return null;
+  return (
+    <div className="mt-3">
+      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">推荐学习网站</p>
+      <div className="mt-2 overflow-hidden rounded-2xl border border-border/50 shadow-[0_18px_35px_-25px_rgba(15,23,42,0.3)]" role="list">
+        {items.map((item, idx) => (
+          <a
+            key={`${item.url}-${idx}`}
+            href={item.url}
+            target="_blank"
+            rel="noreferrer"
+            role="listitem"
+            className={`group block bg-gradient-to-r from-white/95 via-sky-50/80 to-emerald-50/70 px-4 py-3 text-foreground transition hover:bg-gradient-to-r hover:from-white hover:via-sky-100 hover:to-emerald-100 ${
+              idx < items.length - 1 ? 'border-b border-border/40' : ''
+            }`}
+          >
+            <div className="flex items-center justify-between gap-4">
+              <span className="text-sm font-semibold leading-tight text-foreground">{item.title}</span>
+              <span className="text-[11px] text-sky-500 transition group-hover:text-sky-600">立即访问 →</span>
+            </div>
+            {item.description && (
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground/90">{item.description}</p>
+            )}
+            <p className="mt-2 truncate text-[11px] text-muted-foreground/80">{item.url}</p>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function KnowledgeGraph({ items, onFollowUp }: { items: AssistantCardItem[]; onFollowUp: (question: string) => void }) {
