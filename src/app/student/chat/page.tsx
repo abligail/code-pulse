@@ -1,8 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Send, Plus, Loader2 } from 'lucide-react';
+import type { ChangeEvent, ComponentPropsWithoutRef } from 'react';
+import { Send, Plus, Loader2, Paperclip, Image as ImageIcon, File as FileIcon, X, AlertCircle, RefreshCw } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -24,6 +26,7 @@ interface ChatMessage {
   cards?: AssistantCardItem[];
   timestamp: Date;
   streaming?: boolean;
+  attachments?: ChatAttachment[];
 }
 
 interface AssistantCardItem {
@@ -34,12 +37,42 @@ interface AssistantCardItem {
   source?: string;
 }
 
+interface ChatAttachment {
+  id: string;
+  kind: 'image' | 'file';
+  fileId: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  url?: string;
+  status?: 'uploaded';
+}
+
+interface PendingAttachment {
+  id: string;
+  file: File;
+  kind: 'image' | 'file';
+  name: string;
+  size: number;
+  mimeType: string;
+  status: 'uploading' | 'ready' | 'failed';
+  fileId?: string;
+  error?: string;
+}
+
+interface RecommendationLink {
+  title: string;
+  url: string;
+  description?: string;
+}
+
 interface StoredChatMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
   cards?: AssistantCardItem[];
   timestamp: string;
+  attachments?: ChatAttachment[];
 }
 
 interface ChatSession {
@@ -98,6 +131,14 @@ const QUIZ_CACHE_KEY = 'code-pulse/weak-quiz-cache';
 const EBBINGHAUS_INTERVALS = [0.5, 1, 2, 4, 7, 15, 30];
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 const SESSION_RETENTION_MS = 7 * DAY_IN_MS;
+const MAX_ATTACHMENT_COUNT = 9;
+const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024; // 10MB
+const ALLOWED_IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png'];
+const ALLOWED_FILE_EXTENSIONS = ['html', 'xml', 'doc', 'docx', 'txt', 'pdf', 'csv', 'xlsx'];
+const FILE_INPUT_ACCEPT = '.jpg,.jpeg,.png,.html,.xml,.doc,.docx,.txt,.pdf,.csv,.xlsx';
+const COZE_CHAT_ENDPOINT = 'https://api.coze.cn/v3/chat';
+const COZE_UPLOAD_ENDPOINT = 'https://api.coze.cn/v1/files/upload';
+const COZE_API_TOKEN = 'Bearer pat_xNxZkXWRfLm3CJKLtAd9infadFtKKbzcpqn7YdsmvfZmq1pZYoJbLLvc58WAhyTr';
 
 const normalizeUserId = (userId?: string | null) => {
   const trimmed = (userId ?? '').trim();
@@ -208,6 +249,249 @@ const splitAnswers = (text: string): string[] => {
     .filter(Boolean);
 };
 
+const RECOMMENDATION_SECTION_LABEL = '【推荐学习网站】';
+const RECOMMENDATION_END_LABEL = '【薄弱点提醒】';
+const SECTION_BOUNDARY_REGEX = /【[^】]+】/;
+const RECOMMENDATION_ENTRY_REGEX = /(?:^|[\s。；;、])(?:\d+[\.\uFF0E、]?\s*)?([^：:\n]+?)[:：]\s*(https?:\/\/[^\s)）]+)(?:\s*[（(]([^（）()]+)[）)])?/g;
+
+const sanitizeRecommendationLine = (line: string) =>
+  line
+    .replace(/^[\d\.\uFF0E、,，\s-]+/, '')
+    .replace(/^[*-]\s*/, '')
+    .trim();
+
+const parseRecommendationLines = (lines: string[]): RecommendationLink[] => {
+  const items: RecommendationLink[] = [];
+  lines.forEach((line) => {
+    const normalized = sanitizeRecommendationLine(line);
+    if (!normalized) return;
+    const urlMatch = normalized.match(/https?:\/\/[^\s)）]+/i);
+    if (!urlMatch || urlMatch.index === undefined) return;
+    const url = urlMatch[0];
+    const beforeUrl = normalized.slice(0, urlMatch.index).replace(/[：:]\s*$/, '').trim();
+    const afterUrl = normalized.slice(urlMatch.index + url.length).trim();
+    let description = '';
+    const descMatch = afterUrl.match(/^[（(]([^（）()]+)[）)]/);
+    if (descMatch) {
+      description = descMatch[1].trim();
+    } else if (afterUrl) {
+      description = afterUrl.replace(/^[，,:：.。\s-]+/, '').replace(/[）)]$/, '').trim();
+    }
+    items.push({
+      title: beforeUrl || '推荐学习网站',
+      url,
+      description: description || undefined,
+    });
+  });
+  return items;
+};
+
+const parseRecommendationSection = (sectionBody: string): RecommendationLink[] => {
+  const items: RecommendationLink[] = [];
+  RECOMMENDATION_ENTRY_REGEX.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = RECOMMENDATION_ENTRY_REGEX.exec(sectionBody)) !== null) {
+    const rawTitle = match[1]?.trim();
+    const url = match[2]?.trim();
+    if (!rawTitle || !url) continue;
+    const normalizedTitle = rawTitle.replace(/^[\d\.\uFF0E、,，\s-]+/, '') || rawTitle;
+    const description = match[3]?.trim();
+    items.push({
+      title: normalizedTitle,
+      url,
+      description: description || undefined,
+    });
+  }
+  if (items.length > 0) return items;
+
+  const fallbackLines = sectionBody
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return parseRecommendationLines(fallbackLines);
+};
+
+const extractRecommendationsFromMessage = (
+  rawText?: string | null
+): { cleanedText: string; recommendations: RecommendationLink[] } => {
+  const text = typeof rawText === 'string' ? rawText : '';
+  const labelIndex = text.indexOf(RECOMMENDATION_SECTION_LABEL);
+  if (labelIndex < 0) {
+    return { cleanedText: text, recommendations: [] };
+  }
+  const sectionStart = labelIndex + RECOMMENDATION_SECTION_LABEL.length;
+  let sectionEnd = text.length;
+  const specificEndIndex = text.indexOf(RECOMMENDATION_END_LABEL, sectionStart);
+  if (specificEndIndex >= 0) {
+    sectionEnd = specificEndIndex;
+  } else {
+    const boundaryMatch = text.slice(sectionStart).match(SECTION_BOUNDARY_REGEX);
+    if (boundaryMatch?.index !== undefined) {
+      sectionEnd = sectionStart + boundaryMatch.index;
+    }
+  }
+  const sectionBody = text.slice(sectionStart, sectionEnd).trim();
+  const recommendations = parseRecommendationSection(sectionBody);
+  if (recommendations.length === 0) {
+    return { cleanedText: text, recommendations: [] };
+  }
+  const before = text.slice(0, labelIndex).trimEnd();
+  const after = text.slice(sectionEnd).trimStart();
+  const cleanedText = before && after ? `${before}\n\n${after}` : before || after;
+  return { cleanedText, recommendations };
+};
+
+type MarkdownCodeProps = ComponentPropsWithoutRef<'code'> & {
+  inline?: boolean;
+  node?: unknown;
+};
+
+const markdownComponents: Components = {
+  code({ inline, className, children, ...props }: MarkdownCodeProps) {
+    const content = String(children).replace(/\n$/, '');
+    const treatAsInline = inline || (!className && !content.includes('\n'));
+    if (treatAsInline) {
+      return (
+        <code
+          className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[0.9em] text-foreground"
+          {...props}
+        >
+          {content}
+        </code>
+      );
+    }
+    return (
+      <pre className="mt-3 overflow-x-auto rounded-2xl border border-border/60 bg-muted/90 p-4 font-mono text-[0.92em] leading-relaxed text-foreground shadow-inner">
+        <code className={className} {...props}>
+          {content}
+        </code>
+      </pre>
+    );
+  },
+  a({ children, ...props }) {
+    return (
+      <a
+        {...props}
+        target="_blank"
+        rel="noreferrer"
+        className="font-medium text-sky-400 underline decoration-dotted underline-offset-4 transition hover:text-sky-300"
+      >
+        {children}
+      </a>
+    );
+  },
+};
+
+const getFileExtension = (fileName: string) => {
+  const parts = fileName.split('.');
+  return parts.length > 1 ? parts.pop()?.toLowerCase() ?? '' : '';
+};
+
+const determineAttachmentKind = (file: File): 'image' | 'file' | null => {
+  const ext = getFileExtension(file.name);
+  if (!ext) return null;
+  if (ALLOWED_IMAGE_EXTENSIONS.includes(ext)) return 'image';
+  if (ALLOWED_FILE_EXTENSIONS.includes(ext)) return 'file';
+  return null;
+};
+
+const formatFileSize = (bytes: number) => {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${bytes} B`;
+};
+
+const createChatAttachmentFromPending = (pendingAttachment: PendingAttachment, fileId: string): ChatAttachment => {
+  return {
+    id: fileId,
+    fileId,
+    name: pendingAttachment.name,
+    size: pendingAttachment.size,
+    mimeType: pendingAttachment.mimeType,
+    kind: pendingAttachment.kind,
+    status: 'uploaded',
+  };
+};
+
+const resolveFileIdFromResponse = (payload: unknown): string | null => {
+  if (!payload || typeof payload !== 'object') return null;
+  const record = payload as Record<string, unknown>;
+  const tryPick = (value: unknown) => {
+    if (typeof value === 'string' && value.trim()) return value;
+    return null;
+  };
+  const direct = tryPick(record.file_id) ?? tryPick(record.id);
+  if (direct) return direct;
+  const fromData = record.data && typeof record.data === 'object' ? (record.data as Record<string, unknown>) : null;
+  if (fromData) {
+    const dataDirect = tryPick(fromData.file_id) ?? tryPick(fromData.id);
+    if (dataDirect) return dataDirect;
+    const nestedFile = fromData.file && typeof fromData.file === 'object' ? (fromData.file as Record<string, unknown>) : null;
+    const nestedId = nestedFile ? tryPick(nestedFile.id) : null;
+    if (nestedId) return nestedId;
+  }
+  const fromResult = record.result && typeof record.result === 'object' ? (record.result as Record<string, unknown>) : null;
+  if (fromResult) {
+    const resultId = tryPick(fromResult.file_id) ?? tryPick(fromResult.id);
+    if (resultId) return resultId;
+  }
+  return null;
+};
+
+const uploadFileToCoze = async (pendingAttachment: PendingAttachment): Promise<ChatAttachment> => {
+  const formData = new FormData();
+  formData.append('file', pendingAttachment.file);
+  formData.append('usage', 'chat_input');
+  formData.append('type', pendingAttachment.kind === 'image' ? 'image' : 'file');
+  formData.append('name', pendingAttachment.name);
+
+  const response = await fetch(COZE_UPLOAD_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      Authorization: COZE_API_TOKEN,
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    let errorMessage = '附件上传失败，请稍后重试';
+    try {
+      const text = await response.text();
+      if (text) {
+        errorMessage = `附件上传失败：${text.slice(0, 160)}`;
+      }
+    } catch {
+      /* ignore */
+    }
+    throw new Error(errorMessage);
+  }
+
+  let payload: unknown = null;
+  try {
+    payload = await response.json();
+  } catch {
+    /* ignore */
+  }
+
+  const fileId = resolveFileIdFromResponse(payload);
+  if (!fileId) {
+    throw new Error('上传响应缺少文件ID');
+  }
+
+  return createChatAttachmentFromPending(pendingAttachment, fileId);
+};
+
+const generateAttachmentId = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+};
+
 export default function ChatPage() {
   const initialUserIdRef = useRef<string>(getCurrentUserId());
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -235,7 +519,11 @@ export default function ChatPage() {
   const [quizCache, setQuizCache] = useState<Record<string, QuizCacheEntry>>(() =>
     readInitialQuizCache(initialUserIdRef.current)
   );
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const quizCacheRef = useRef<Record<string, QuizCacheEntry>>(quizCache);
   const [activeWeakPoint, setActiveWeakPoint] = useState<WeakKnowledgePoint | null>(null);
@@ -246,7 +534,7 @@ export default function ChatPage() {
       const updatedAt = new Date(session.updatedAt).getTime();
       return Number.isFinite(updatedAt) && now - updatedAt <= SESSION_RETENTION_MS;
     });
-  }, [SESSION_RETENTION_MS]);
+  }, []);
 
   // Load history from localStorage on mount
   useEffect(() => {
@@ -361,6 +649,7 @@ export default function ChatPage() {
         text: m.text,
         cards: m.cards,
         timestamp: m.timestamp.toISOString(),
+        attachments: m.attachments,
       }));
       if (idx >= 0) {
         nextSessions[idx] = {
@@ -393,6 +682,93 @@ export default function ChatPage() {
       hour: '2-digit',
       minute: '2-digit',
     });
+
+  const uploadPendingAttachment = (pending: PendingAttachment) => {
+    void (async () => {
+      try {
+        const uploaded = await uploadFileToCoze(pending);
+        setAttachments((prev) => [...prev, uploaded]);
+        setPendingAttachments((prev) => prev.filter((item) => item.id !== pending.id));
+        setAttachmentError(null);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '附件上传失败';
+        setPendingAttachments((prev) =>
+          prev.map((item) =>
+            item.id === pending.id
+              ? {
+                  ...item,
+                  status: 'failed',
+                  error: message,
+                }
+              : item
+          )
+        );
+        setAttachmentError(message);
+      }
+    })();
+  };
+
+  const handleAttachmentSelection = (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    let remainingSlots = MAX_ATTACHMENT_COUNT - (attachments.length + pendingAttachments.length);
+    if (remainingSlots <= 0) {
+      setAttachmentError(`最多只能添加${MAX_ATTACHMENT_COUNT}个附件`);
+      return;
+    }
+    let lastError: string | null = null;
+    Array.from(fileList).forEach((file) => {
+      if (remainingSlots <= 0) return;
+      const kind = determineAttachmentKind(file);
+      if (!kind) {
+        lastError = '存在不支持的文件类型';
+        return;
+      }
+      if (file.size > MAX_ATTACHMENT_SIZE) {
+        lastError = '单个附件大小不能超过10MB';
+        return;
+      }
+      const pending: PendingAttachment = {
+        id: generateAttachmentId(),
+        file,
+        kind,
+        name: file.name,
+        size: file.size,
+        mimeType: file.type || 'application/octet-stream',
+        status: 'uploading',
+      };
+      remainingSlots -= 1;
+      setPendingAttachments((prev) => [...prev, pending]);
+      uploadPendingAttachment(pending);
+    });
+    setAttachmentError(lastError);
+  };
+
+  const handleAttachmentButtonClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleAttachmentInputChange = (event: ChangeEvent<HTMLInputElement>) => {
+    handleAttachmentSelection(event.target.files);
+    if (event.target.value) {
+      event.target.value = '';
+    }
+  };
+
+  const removeAttachment = (attachmentId: string) => {
+    setAttachments((prev) => prev.filter((item) => item.id !== attachmentId));
+  };
+
+  const removePendingAttachment = (pendingId: string) => {
+    setPendingAttachments((prev) => prev.filter((item) => item.id !== pendingId));
+  };
+
+  const retryPendingAttachment = (pendingId: string) => {
+    const target = pendingAttachments.find((item) => item.id === pendingId);
+    if (!target) return;
+    const next: PendingAttachment = { ...target, status: 'uploading', error: undefined };
+    setPendingAttachments((prev) => prev.map((item) => (item.id === pendingId ? next : item)));
+    uploadPendingAttachment(next);
+  };
 
   const handleWeakPointRemoval = useCallback((knowledgeId: string) => {
     setWeakPoints((prev) => prev.filter((item) => item.knowledge_id !== knowledgeId));
@@ -533,7 +909,7 @@ export default function ChatPage() {
     const res = await fetch('https://api.coze.cn/v1/workflow/stream_run', {
       method: 'POST',
       headers: {
-        Authorization: 'Bearer pat_xNxZkXWRfLm3CJKLtAd9infadFtKKbzcpqn7YdsmvfZmq1pZYoJbLLvc58WAhyTr',
+        Authorization: COZE_API_TOKEN,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -800,7 +1176,7 @@ export default function ChatPage() {
         const res = await fetch('https://api.coze.cn/v1/workflow/stream_run', {
           method: 'POST',
           headers: {
-            Authorization: 'Bearer pat_xNxZkXWRfLm3CJKLtAd9infadFtKKbzcpqn7YdsmvfZmq1pZYoJbLLvc58WAhyTr',
+            Authorization: COZE_API_TOKEN,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -897,6 +1273,11 @@ export default function ChatPage() {
   const handleSendMessage = async (message: string) => {
     if (!message.trim() || isLoading) return;
 
+    if (pendingAttachments.some((item) => item.status === 'uploading')) {
+      setAttachmentError('仍有附件在上传，请稍后发送');
+      return;
+    }
+
     if (abortRef.current) {
       abortRef.current.abort();
     }
@@ -904,17 +1285,21 @@ export default function ChatPage() {
     const user = getActiveUser();
     const userId = user?.userId ?? 'guest';
     const roundId = Date.now().toString();
+    const attachmentsSnapshot = attachments.map((item) => ({ ...item }));
     const userMessage: ChatMessage = {
       id: `${roundId}-u`,
       role: 'user',
       text: message,
       timestamp: new Date(),
+      attachments: attachmentsSnapshot,
     };
     if (!currentSessionId) {
       setCurrentSessionId(roundId);
     }
     setMessages((prev) => [...prev, userMessage]);
     setInputValue('');
+    setAttachments([]);
+    setAttachmentError(null);
     setIsLoading(true);
 
     const controller = new AbortController();
@@ -922,18 +1307,47 @@ export default function ChatPage() {
 
     const baseUrl = 'https://api.coze.cn/v3/chat';
     const url = conversationId ? `${baseUrl}?conversation_id=${conversationId}` : baseUrl;
+    const userTextContent = `（uuid为${userId}）${message}`;
+    const additionalMessages = attachmentsSnapshot.length
+      ? [
+          {
+            role: 'user',
+            type: 'question',
+            content_type: 'object_string',
+            content: JSON.stringify([
+              ...attachmentsSnapshot.map((attachment) =>
+                attachment.kind === 'image'
+                  ? {
+                      type: 'image',
+                      file_id: attachment.fileId,
+                    }
+                  : {
+                      type: 'file',
+                      file_id: attachment.fileId,
+                      name: attachment.name,
+                      mime_type: attachment.mimeType,
+                    }
+              ),
+              {
+                type: 'text',
+                text: userTextContent,
+              },
+            ]),
+          },
+        ]
+      : [
+          {
+            content: userTextContent,
+            content_type: 'text',
+            role: 'user',
+            type: 'question',
+          },
+        ];
     const payload = {
       bot_id: '7555046738315214894',
       user_id: userId,
       stream: true,
-      additional_messages: [
-        {
-          content: '（uuid为' + userId + '）' + message,
-          content_type: 'text',
-          role: 'user',
-          type: 'question',
-        },
-      ],
+      additional_messages: additionalMessages,
     };
 
     const assistantId = `${roundId}-a`;
@@ -943,7 +1357,7 @@ export default function ChatPage() {
       const response = await fetch(url, {
         method: 'POST',
         headers: {
-          Authorization: 'Bearer pat_xNxZkXWRfLm3CJKLtAd9infadFtKKbzcpqn7YdsmvfZmq1pZYoJbLLvc58WAhyTr',
+          Authorization: COZE_API_TOKEN,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
@@ -1173,6 +1587,8 @@ export default function ChatPage() {
     void submitQuizReview(checks);
   };
 
+  const attachmentLimitReached = attachments.length + pendingAttachments.length >= MAX_ATTACHMENT_COUNT;
+
   return (
     <>
     <TooltipProvider delayDuration={120} skipDelayDuration={120}>
@@ -1233,45 +1649,63 @@ export default function ChatPage() {
 
             <ScrollArea className="relative min-h-0 flex-1 px-5 py-6 lg:px-6" viewportRef={scrollRef}>
               <div className="mx-auto max-w-3xl space-y-5 pb-10">
-                {messages.map((message, index) => (
-                  <div
-                    key={message.id}
-                    className={`motion-fade-up flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                    style={{ animationDelay: `${Math.min(index, 8) * 35}ms` }}
-                  >
-                    <div className="max-w-[84%]">
-                      <div
-                        className={`rounded-2xl px-4 py-3 text-sm shadow-[0_20px_30px_-22px_rgba(15,23,42,0.72)] ${
-                          message.role === 'user'
-                            ? 'rounded-br-md bg-[linear-gradient(135deg,rgb(37_99_235),rgb(14_116_144))] text-primary-foreground'
-                            : 'rounded-bl-md border border-border/70 bg-card/92 text-foreground'
-                        }`}
-                      >
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          className="prose prose-sm max-w-none text-foreground prose-p:leading-relaxed prose-pre:bg-muted prose-pre:text-foreground"
+                {messages.map((message, index) => {
+                  const { cleanedText, recommendations } = extractRecommendationsFromMessage(message.text);
+                  const trimmed = cleanedText.trim();
+                  let displayText = trimmed.length > 0 ? cleanedText : '';
+                  if (!displayText) {
+                    if (message.streaming) {
+                      displayText = '...';
+                    } else if (recommendations.length > 0) {
+                      displayText = '推荐站点已整理如下：';
+                    } else {
+                      displayText = message.text || '';
+                    }
+                  }
+                  return (
+                    <div
+                      key={message.id}
+                      className={`motion-fade-up flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                      style={{ animationDelay: `${Math.min(index, 8) * 35}ms` }}
+                    >
+                      <div className="max-w-[84%]">
+                        <div
+                          className={`rounded-2xl px-4 py-3 text-sm shadow-[0_20px_30px_-22px_rgba(15,23,42,0.72)] ${
+                            message.role === 'user'
+                              ? 'rounded-br-md bg-[linear-gradient(135deg,rgb(37_99_235),rgb(14_116_144))] text-primary-foreground'
+                              : 'rounded-bl-md border border-border/70 bg-card/92 text-foreground'
+                          }`}
                         >
-                          {message.text || (message.streaming ? '...' : '')}
-                        </ReactMarkdown>
-                        {message.streaming && (
-                          <div className="mt-2 text-xs text-muted-foreground">生成中...</div>
-                        )}
-                      </div>
-                      {message.cards && message.cards.length > 0 && !message.streaming && (
-                        <div className="mt-3">
-                          <KnowledgeGraph items={message.cards} onFollowUp={handleFollowUp} />
+                          <MarkdownMessage content={displayText} />
+                          {message.streaming && (
+                            <div className="mt-2 text-xs text-muted-foreground">生成中...</div>
+                          )}
                         </div>
-                      )}
-                      <p
-                        className={`mt-1 px-1 text-[11px] text-muted-foreground ${
-                          message.role === 'user' ? 'text-right' : 'text-left'
-                        }`}
-                      >
-                        {formatMessageTime(message.timestamp)}
-                      </p>
+                        {message.attachments?.length ? (
+                          <MessageAttachmentList
+                            attachments={message.attachments}
+                            alignment={message.role === 'user' ? 'end' : 'start'}
+                          />
+                        ) : null}
+                        {!message.streaming && recommendations.length > 0 && (
+                          <RecommendationLinks items={recommendations} />
+                        )}
+                        {message.cards && message.cards.length > 0 && !message.streaming && (
+                          <div className="mt-3">
+                            <KnowledgeGraph items={message.cards} onFollowUp={handleFollowUp} />
+                          </div>
+                        )}
+                        <p
+                          className={`mt-1 px-1 text-[11px] text-muted-foreground ${
+                            message.role === 'user' ? 'text-right' : 'text-left'
+                          }`}
+                        >
+                          {formatMessageTime(message.timestamp)}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
 
                 {isLoading && (
                   <div className="motion-fade-up flex justify-start">
@@ -1287,22 +1721,115 @@ export default function ChatPage() {
             </ScrollArea>
 
             <div className="border-t border-border/65 bg-background/86 px-4 py-4 backdrop-blur-md">
-              <div className="mx-auto flex max-w-3xl gap-2">
-                <Input
-                  value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
-                  onKeyDown={(e) =>
-                    e.key === 'Enter' &&
-                    !e.shiftKey &&
-                    (e.preventDefault(), handleSendMessage(inputValue))
-                  }
-                  placeholder="输入你的问题..."
-                  disabled={isLoading}
-                  className="flex-1 border-border/75 bg-card/84"
+              <div className="mx-auto max-w-3xl space-y-3">
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleAttachmentButtonClick}
+                    disabled={attachmentLimitReached}
+                    className="h-11 w-11 border-border/70"
+                  >
+                    <ClientIcon icon={Paperclip} className="h-4 w-4" />
+                    <span className="sr-only">添加附件</span>
+                  </Button>
+                  <Input
+                    value={inputValue}
+                    onChange={(e) => setInputValue(e.target.value)}
+                    onKeyDown={(e) =>
+                      e.key === 'Enter' &&
+                      !e.shiftKey &&
+                      (e.preventDefault(), handleSendMessage(inputValue))
+                    }
+                    placeholder="输入你的问题..."
+                    disabled={isLoading}
+                    className="flex-1 border-border/75 bg-card/84"
+                  />
+                  <Button onClick={() => handleSendMessage(inputValue)} disabled={isLoading || !inputValue.trim()}>
+                    <ClientIcon icon={Send} className="h-4 w-4" />
+                  </Button>
+                </div>
+                {(attachments.length > 0 || pendingAttachments.length > 0) && (
+                  <div className="flex flex-wrap gap-2">
+                    {attachments.map((attachment) => (
+                      <div
+                        key={attachment.id}
+                        className="flex min-w-[180px] items-center gap-2 rounded-2xl border border-border/65 bg-card/80 px-3 py-1.5 text-left text-xs shadow-sm"
+                      >
+                        {attachment.kind === 'image' ? (
+                          <ImageIcon className="h-4 w-4 text-sky-400" />
+                        ) : (
+                          <FileIcon className="h-4 w-4 text-emerald-400" />
+                        )}
+                        <div className="flex min-w-0 flex-1 flex-col">
+                          <span className="truncate font-medium text-foreground">{attachment.name}</span>
+                          <span className="text-[11px] text-muted-foreground">{formatFileSize(attachment.size)}</span>
+                        </div>
+                        <button
+                          type="button"
+                          aria-label="移除附件"
+                          className="rounded-full p-1 text-muted-foreground/70 transition hover:bg-muted/70 hover:text-foreground"
+                          onClick={() => removeAttachment(attachment.id)}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                    {pendingAttachments.map((pending) => (
+                      <div
+                        key={pending.id}
+                        className="flex min-w-[200px] items-center gap-2 rounded-2xl border border-border/65 bg-card/70 px-3 py-1.5 text-left text-xs shadow-sm"
+                      >
+                        {pending.status === 'failed' ? (
+                          <AlertCircle className="h-4 w-4 text-destructive" />
+                        ) : (
+                          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                        )}
+                        <div className="flex min-w-0 flex-1 flex-col">
+                          <span className="truncate font-medium text-foreground">{pending.name}</span>
+                          <span className="text-[11px] text-muted-foreground">
+                            {formatFileSize(pending.size)} · {pending.status === 'failed' ? '上传失败' : '上传中'}
+                          </span>
+                          {pending.error && (
+                            <span className="text-[11px] text-destructive">{pending.error}</span>
+                          )}
+                        </div>
+                        {pending.status === 'failed' && (
+                          <button
+                            type="button"
+                            aria-label="重试上传"
+                            className="rounded-full p-1 text-muted-foreground/80 transition hover:bg-muted/70 hover:text-foreground"
+                            onClick={() => retryPendingAttachment(pending.id)}
+                          >
+                            <RefreshCw className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          aria-label="移除附件"
+                          className="rounded-full p-1 text-muted-foreground/70 transition hover:bg-muted/70 hover:text-foreground"
+                          onClick={() => removePendingAttachment(pending.id)}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {attachmentError && (
+                  <p className="text-xs text-destructive">{attachmentError}</p>
+                )}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  className="hidden"
+                  multiple
+                  accept={FILE_INPUT_ACCEPT}
+                  onChange={handleAttachmentInputChange}
                 />
-                <Button onClick={() => handleSendMessage(inputValue)} disabled={isLoading || !inputValue.trim()}>
-                  <ClientIcon icon={Send} className="h-4 w-4" />
-                </Button>
+                <p className="text-center text-[11px] text-muted-foreground">
+                  支持图片及文档，单个文件不超过 {formatFileSize(MAX_ATTACHMENT_SIZE)}，共 {MAX_ATTACHMENT_COUNT} 个。
+                </p>
               </div>
               <p className="mt-2 text-center text-xs text-muted-foreground">提示式学习 · 不直接给答案</p>
             </div>
@@ -1544,6 +2071,50 @@ export default function ChatPage() {
     );
 }
 
+function MarkdownMessage({ content }: { content: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={markdownComponents}
+      className="prose prose-sm max-w-none text-inherit prose-headings:text-inherit prose-strong:text-inherit prose-p:leading-relaxed prose-li:marker:text-muted-foreground"
+    >
+      {content}
+    </ReactMarkdown>
+  );
+}
+
+function RecommendationLinks({ items }: { items: RecommendationLink[] }) {
+  if (!items.length) return null;
+  return (
+    <div className="mt-3">
+      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">推荐学习网站</p>
+      <div className="mt-2 overflow-hidden rounded-2xl border border-border/50 shadow-[0_18px_35px_-25px_rgba(15,23,42,0.3)]" role="list">
+        {items.map((item, idx) => (
+          <a
+            key={`${item.url}-${idx}`}
+            href={item.url}
+            target="_blank"
+            rel="noreferrer"
+            role="listitem"
+            className={`group block bg-gradient-to-r from-white/95 via-sky-50/80 to-emerald-50/70 px-4 py-3 text-foreground transition hover:bg-gradient-to-r hover:from-white hover:via-sky-100 hover:to-emerald-100 ${
+              idx < items.length - 1 ? 'border-b border-border/40' : ''
+            }`}
+          >
+            <div className="flex items-center justify-between gap-4">
+              <span className="text-sm font-semibold leading-tight text-foreground">{item.title}</span>
+              <span className="text-[11px] text-sky-500 transition group-hover:text-sky-600">立即访问 →</span>
+            </div>
+            {item.description && (
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground/90">{item.description}</p>
+            )}
+            <p className="mt-2 truncate text-[11px] text-muted-foreground/80">{item.url}</p>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function KnowledgeGraph({ items, onFollowUp }: { items: AssistantCardItem[]; onFollowUp: (question: string) => void }) {
   const graph = useMemo(() => {
     const grouped = new Map<string, AssistantCardItem[]>();
@@ -1693,6 +2264,36 @@ function KnowledgeGraph({ items, onFollowUp }: { items: AssistantCardItem[]; onF
           ))
         )}
       </div>
+    </div>
+  );
+}
+
+function MessageAttachmentList({
+  attachments,
+  alignment,
+}: {
+  attachments: ChatAttachment[];
+  alignment: 'start' | 'end';
+}) {
+  if (!attachments.length) return null;
+  return (
+    <div className={`mt-2 flex flex-wrap gap-2 ${alignment === 'end' ? 'justify-end' : 'justify-start'}`}>
+      {attachments.map((attachment) => (
+        <div
+          key={attachment.id}
+          className="flex min-w-[180px] items-center gap-2 rounded-2xl border border-border/60 bg-background/70 px-3 py-1.5 text-left text-xs shadow-sm"
+        >
+          {attachment.kind === 'image' ? (
+            <ImageIcon className="h-4 w-4 text-sky-400" />
+          ) : (
+            <FileIcon className="h-4 w-4 text-emerald-400" />
+          )}
+          <div className="flex min-w-0 flex-col">
+            <span className="truncate font-medium text-foreground">{attachment.name}</span>
+            <span className="text-[11px] text-muted-foreground">{formatFileSize(attachment.size)}</span>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
