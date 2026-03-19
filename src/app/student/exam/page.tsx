@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { PageHeader, PageHeaderDescription, PageHeaderHeading, PageHeaderTitle } from '@/components/ui/page-header';
 import { PageState } from '@/components/ui/page-state';
+import { QuestionStem } from '@/components/question-stem';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { logUserEvent } from '@/lib/api/events';
 import {
@@ -90,23 +91,32 @@ export default function ExamPage() {
     setAnalysisError(null);
     setAnalysisText('');
     try {
+      const data = await submitPracticeSetAnswers({
+        answers: payloadAnswers,
+      });
+      setResult(data);
       let analysisContent = '';
       try {
         const userId = getActiveUser()?.userId || '';
+        const resultByQuestionId = new Map(data.results.map((item) => [item.questionId, item]));
         const analysis = await generatePracticeAnalysis({
           mode: 'set',
           user_id: userId || undefined,
           payload: {
-            questions: questions.map((question) => ({
-              question_id: question.id,
-              question_type: question.type,
-              question_stem: question.stem,
-              options: question.options,
-              knowledge_points: question.knowledgePoints,
-              selected_option: answers[question.id] ?? '',
-            })),
+            questions: questions.map((question) => {
+              const answerItem = resultByQuestionId.get(question.id);
+              return {
+                question_id: question.id,
+                question_type: question.type,
+                question_stem: question.stem,
+                options: question.options,
+                knowledge_points: question.knowledgePoints,
+                selected_option: answerItem?.selectedOption ?? answers[question.id] ?? '',
+                correct_option: answerItem?.correctOption ?? '',
+              };
+            }),
           },
-          user_reply: '学生已完成整套题作答。',
+          user_reply: '学生已完成整套题作答并完成判题。',
         });
         analysisContent = analysis.analysis?.trim() || '';
         setAnalysisText(analysisContent);
@@ -114,13 +124,6 @@ export default function ExamPage() {
         console.error('Failed to generate set analysis', analysisErr);
         setAnalysisError('整卷解析生成失败，请稍后重试。');
       }
-      const data = await submitPracticeSetAnswers({
-        answers: payloadAnswers.map((item) => ({
-          ...item,
-          '答案解析': analysisContent || undefined,
-        })),
-      });
-      setResult(data);
       const correctCount = data.results.filter((item) => item.isCorrect).length;
       void logUserEvent({
         eventType: 'practice_submit',
@@ -213,7 +216,7 @@ export default function ExamPage() {
               <CardHeader>
                 <CardTitle className="text-base">第 {index + 1} 题</CardTitle>
                 <CardDescription className="space-y-2">
-                  <span className="block text-sm text-foreground">{question.stem}</span>
+                  <QuestionStem value={question.stem} />
                   <span className="flex flex-wrap gap-2">
                     <Badge variant="outline">题目ID: {question.id}</Badge>
                     {question.knowledgePoints.map((point) => (

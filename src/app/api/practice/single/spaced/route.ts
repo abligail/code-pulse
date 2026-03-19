@@ -16,7 +16,6 @@ export async function POST(request: Request) {
     zpd_min: readNumber(body.zpd_min, 0.6, 0, 1),
     zpd_max: readNumber(body.zpd_max, 0.8, 0, 1),
     expected_mode: readString(body.expected_mode, 'min'),
-    interval_days: readInteger(body.interval_days, 7, 1),
     alpha: readNumber(body.alpha, 0.6, 0, 1),
     beta: readNumber(body.beta, 0.4, 0, 1),
     mastery_threshold: readNumber(body.mastery_threshold, 0.6, 0, 1),
@@ -27,4 +26,3 @@ export async function POST(request: Request) {
 
   return proxyPost('/questions/single/spaced', payload);
 }
-

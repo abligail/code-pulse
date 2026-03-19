@@ -9,7 +9,72 @@ const PRACTICE_ANALYSIS_WORKFLOW_ID = '7607064355598762019';
 const COZE_API_TOKEN =
   process.env.COZE_API_TOKEN?.trim() ||
   process.env.COZE_API_PAT?.trim() ||
-  'pat_xNxZkXWRfLm3CJKLtAd9infadFtKKbzcpqn7YdsmvfZmq1pZYoJbLLvc58WAhyTr';
+  'pat_AZJaFLL61tgYMtoO9yQlyPPvo6d3lUmqOxJRyGeAoiiIFrfUdeUiJdICC5q8jxcG';
+const OPTION_ORDER = ['A', 'B', 'C', 'D'] as const;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const asText = (value: unknown, fallback = '') => {
+  if (typeof value !== 'string') return fallback;
+  const trimmed = value.trim();
+  return trimmed || fallback;
+};
+
+const formatOptions = (value: unknown) => {
+  if (Array.isArray(value)) {
+    return OPTION_ORDER.map((key, index) => `${key}. ${asText(value[index]) || '（无）'}`).join('\n');
+  }
+  if (isRecord(value)) {
+    return OPTION_ORDER.map((key) => `${key}. ${asText(value[key]) || '（无）'}`).join('\n');
+  }
+  return OPTION_ORDER.map((key) => `${key}. （无）`).join('\n');
+};
+
+const getSingleInput = (payload: unknown, userReply: string) => {
+  const data = isRecord(payload) ? payload : {};
+  const stem = asText(data.question_stem ?? data.question_text ?? data.stem, '（无题干）');
+  const selectedOption = asText(data.selected_option ?? data.student_answer, '未知');
+  const correctOption = asText(data.correct_option ?? data.reference_answer, '未知');
+  const optionsText = formatOptions(data.options);
+  return [
+    `题干：${stem}`,
+    '选项：',
+    optionsText,
+    `学生答案：${selectedOption}`,
+    `正确答案：${correctOption}`,
+    `用户补充：${userReply}`,
+  ].join('\n');
+};
+
+const getSetInput = (payload: unknown, userReply: string) => {
+  const data = isRecord(payload) ? payload : {};
+  const questions = Array.isArray(data.questions) ? data.questions : [];
+  if (questions.length === 0) {
+    return userReply;
+  }
+  const questionBlocks = questions.map((item, index) => {
+    const question = isRecord(item) ? item : {};
+    const stem = asText(question.question_stem ?? question.question_text ?? question.stem, '（无题干）');
+    const selectedOption = asText(question.selected_option ?? question.student_answer, '未知');
+    const correctOption = asText(question.correct_option ?? question.reference_answer, '未知');
+    const optionsText = formatOptions(question.options);
+    return [
+      `第${index + 1}题：`,
+      `题干：${stem}`,
+      '选项：',
+      optionsText,
+      `学生答案：${selectedOption}`,
+      `正确答案：${correctOption}`,
+    ].join('\n');
+  });
+  return [...questionBlocks, `用户补充：${userReply}`].join('\n\n');
+};
+
+const buildWorkflowInput = (mode: string, payload: unknown, userReply: string) => {
+  if (mode === 'set') return getSetInput(payload, userReply);
+  return getSingleInput(payload, userReply);
+};
 
 const parseWorkflowOutput = (text: string): string | null => {
   if (!text) return null;
@@ -61,14 +126,14 @@ export async function POST(request: Request) {
   }
 
   const userReply = readString(body.user_reply, mode === 'set' ? '学生已完成整套题作答。' : '学生已完成本题作答。');
-  const input = `【题目信息】：${JSON.stringify(
-    {
-      mode,
-      payload,
-    },
-    null,
-    2
-  )}\n【用户回复】：${userReply}`;
+  const input = buildWorkflowInput(mode, payload, userReply);
+  const inputPreview = input.length > 300 ? `${input.slice(0, 300)}...` : input;
+  console.info('[practice-analysis] Coze request', {
+    mode,
+    userId,
+    inputLength: input.length,
+    inputPreview,
+  });
 
   try {
     const response = await fetch(COZE_WORKFLOW_URL, {
@@ -129,4 +194,3 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Practice analysis workflow failed' }, { status: 502 });
   }
 }
-

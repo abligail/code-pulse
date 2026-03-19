@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { PageHeader, PageHeaderDescription, PageHeaderHeading, PageHeaderTitle } from '@/components/ui/page-header';
 import { PageState } from '@/components/ui/page-state';
+import { QuestionStem } from '@/components/question-stem';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Textarea } from '@/components/ui/textarea';
 import {
@@ -22,6 +23,7 @@ import {
   fetchSinglePracticeQuestion,
   generatePracticeAnalysis,
   submitSinglePracticeAnswer,
+  updatePracticeIntervalDays,
   type ChoiceOption,
   type PracticeQuestion,
   type PracticeStrategy,
@@ -228,6 +230,10 @@ export default function PracticePage() {
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [isLoadingQuestion, setIsLoadingQuestion] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [intervalDaysInput, setIntervalDaysInput] = useState('7');
+  const [isUpdatingIntervalDays, setIsUpdatingIntervalDays] = useState(false);
+  const [intervalDaysMessage, setIntervalDaysMessage] = useState<string | null>(null);
+  const [intervalDaysError, setIntervalDaysError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const visibleOptions = useMemo(
@@ -436,6 +442,11 @@ export default function PracticePage() {
     void loadTeacherAssignmentSection();
   }, [loadTeacherAssignmentSection]);
 
+  useEffect(() => {
+    setIntervalDaysMessage(null);
+    setIntervalDaysError(null);
+  }, [studentUserId]);
+
   const loadQuestion = async () => {
     setIsLoadingQuestion(true);
     setError(null);
@@ -460,6 +471,38 @@ export default function PracticePage() {
     }
   };
 
+  const updateIntervalDays = async () => {
+    if (!studentUserId) {
+      setIntervalDaysError('未识别学生账号，无法更新间隔天数。');
+      setIntervalDaysMessage(null);
+      return;
+    }
+
+    const parsed = Number.parseInt(intervalDaysInput, 10);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 365) {
+      setIntervalDaysError('请输入 1~365 的整数。');
+      setIntervalDaysMessage(null);
+      return;
+    }
+
+    setIsUpdatingIntervalDays(true);
+    setIntervalDaysError(null);
+    setIntervalDaysMessage(null);
+    try {
+      const data = await updatePracticeIntervalDays({
+        user_id: studentUserId,
+        interval_days: parsed,
+      });
+      setIntervalDaysInput(String(data.intervalDays));
+      setIntervalDaysMessage(`间隔重复天数已更新为 ${data.intervalDays} 天。`);
+    } catch (updateError) {
+      console.error('Failed to update interval_days', updateError);
+      setIntervalDaysError('更新间隔重复天数失败，请稍后重试。');
+    } finally {
+      setIsUpdatingIntervalDays(false);
+    }
+  };
+
   const submitAnswer = async () => {
     if (!question || !selectedOption || answerResult) return;
     setIsSubmitting(true);
@@ -468,6 +511,11 @@ export default function PracticePage() {
     setAnalysisError(null);
     setAnalysisText('');
     try {
+      const data = await submitSinglePracticeAnswer({
+        question_id: question.id,
+        selected_option: selectedOption,
+      });
+      setAnswerResult(data);
       let analysisContent = '';
       try {
         const userId = getActiveUser()?.userId || '';
@@ -481,9 +529,10 @@ export default function PracticePage() {
             question_stem: question.stem,
             options: question.options,
             knowledge_points: question.knowledgePoints,
-            selected_option: selectedOption,
+            selected_option: data.selectedOption,
+            correct_option: data.correctOption,
           },
-          user_reply: `选择了选项 ${selectedOption}`,
+          user_reply: `学生答案：${data.selectedOption}；正确答案：${data.correctOption}`,
         });
         analysisContent = analysis.analysis?.trim() || '';
         setAnalysisText(analysisContent);
@@ -491,12 +540,6 @@ export default function PracticePage() {
         console.error('Failed to generate single-question analysis', analysisErr);
         setAnalysisError('解析生成失败，请稍后重试。');
       }
-      const data = await submitSinglePracticeAnswer({
-        question_id: question.id,
-        selected_option: selectedOption,
-        '答案解析': analysisContent || undefined,
-      });
-      setAnswerResult(data);
       void logUserEvent({
         eventType: 'practice_submit',
         source: 'student/practice',
@@ -780,6 +823,39 @@ export default function PracticePage() {
                 <Badge variant="outline">{zpdApplied ? '已应用ZPD筛选' : '未应用ZPD筛选'}</Badge>
               </>
             )}
+            <div className="basis-full border-t border-border/60" />
+            <Badge variant="outline">间隔重复天数（1-365）</Badge>
+            <Input
+              type="number"
+              min={1}
+              max={365}
+              value={intervalDaysInput}
+              onChange={(event) => setIntervalDaysInput(event.target.value)}
+              className="w-28"
+              disabled={isUpdatingIntervalDays}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={updateIntervalDays}
+              disabled={isUpdatingIntervalDays || !studentUserId}
+            >
+              {isUpdatingIntervalDays ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  更新中...
+                </>
+              ) : (
+                '更新 interval_days'
+              )}
+            </Button>
+            {intervalDaysMessage && (
+              <p className="text-xs text-emerald-600">{intervalDaysMessage}</p>
+            )}
+            {intervalDaysError && (
+              <p className="text-xs text-destructive">{intervalDaysError}</p>
+            )}
           </CardContent>
         </Card>
 
@@ -813,7 +889,7 @@ export default function PracticePage() {
                   <Badge key={point} variant="secondary">{point}</Badge>
                 ))}
               </div>
-              <CardTitle className="text-lg leading-relaxed">{question.stem}</CardTitle>
+              <QuestionStem value={question.stem} />
             </CardHeader>
             <CardContent className="space-y-5">
               <RadioGroup

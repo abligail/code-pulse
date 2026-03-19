@@ -40,3 +40,10 @@ export const apiPost = <T>(url: string, body: unknown, options: ApiFetchOptions 
     method: 'POST',
     body: JSON.stringify(body),
   });
+
+export const apiPut = <T>(url: string, body: unknown, options: ApiFetchOptions = {}) =>
+  apiFetch<T>(url, {
+    ...options,
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });

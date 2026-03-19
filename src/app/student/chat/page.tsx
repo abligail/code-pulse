@@ -138,7 +138,60 @@ const ALLOWED_FILE_EXTENSIONS = ['html', 'xml', 'doc', 'docx', 'txt', 'pdf', 'cs
 const FILE_INPUT_ACCEPT = '.jpg,.jpeg,.png,.html,.xml,.doc,.docx,.txt,.pdf,.csv,.xlsx';
 const COZE_CHAT_ENDPOINT = 'https://api.coze.cn/v3/chat';
 const COZE_UPLOAD_ENDPOINT = 'https://api.coze.cn/v1/files/upload';
-const COZE_API_TOKEN = 'Bearer pat_xNxZkXWRfLm3CJKLtAd9infadFtKKbzcpqn7YdsmvfZmq1pZYoJbLLvc58WAhyTr';
+const COZE_API_TOKEN = 'Bearer pat_AZJaFLL61tgYMtoO9yQlyPPvo6d3lUmqOxJRyGeAoiiIFrfUdeUiJdICC5q8jxcG';
+
+const parseWeakPointTimestamp = (value: string | null | undefined) => {
+  if (!value) return 0;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+};
+
+const dedupeWeakKnowledgePoints = (points: WeakKnowledgePoint[]) => {
+  const merged = new Map<string, WeakKnowledgePoint>();
+
+  for (const point of points) {
+    const knowledgeId = (point.knowledge_id ?? '').trim();
+    const fallbackKey = `${point.knowledge_name ?? ''}::${point.weak_reason ?? ''}::${(point.knowledge_category ?? []).join('|')}`;
+    const key = knowledgeId || fallbackKey;
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, {
+        ...point,
+        knowledge_id: knowledgeId,
+        knowledge_name: (point.knowledge_name ?? '').trim(),
+        knowledge_category: Array.isArray(point.knowledge_category) ? point.knowledge_category.filter(Boolean) : [],
+        weak_reason: (point.weak_reason ?? '').trim(),
+      });
+      continue;
+    }
+
+    const firstWeakTime =
+      parseWeakPointTimestamp(point.first_weak_time) < parseWeakPointTimestamp(existing.first_weak_time)
+        ? point.first_weak_time
+        : existing.first_weak_time;
+    const lastReviewTime =
+      parseWeakPointTimestamp(point.last_review_time) > parseWeakPointTimestamp(existing.last_review_time)
+        ? point.last_review_time
+        : existing.last_review_time;
+
+    merged.set(key, {
+      ...existing,
+      knowledge_id: existing.knowledge_id || knowledgeId,
+      knowledge_name: existing.knowledge_name || (point.knowledge_name ?? '').trim(),
+      knowledge_category: Array.from(new Set([...(existing.knowledge_category ?? []), ...((point.knowledge_category ?? []).filter(Boolean) as string[])])),
+      weak_reason:
+        existing.weak_reason.length >= (point.weak_reason ?? '').trim().length
+          ? existing.weak_reason
+          : (point.weak_reason ?? '').trim(),
+      weak_score: Math.max(existing.weak_score ?? 0, point.weak_score ?? 0),
+      first_weak_time: firstWeakTime,
+      last_review_time: lastReviewTime,
+      review_count: Math.max(existing.review_count ?? 0, point.review_count ?? 0),
+    });
+  }
+
+  return Array.from(merged.values());
+};
 
 const normalizeUserId = (userId?: string | null) => {
   const trimmed = (userId ?? '').trim();
@@ -883,7 +936,7 @@ export default function ChatPage() {
         const profileContainer = parsed as UserProfileResponse & { user_profile?: UserProfileResponse };
         const profile: UserProfileResponse | undefined = profileContainer.user_profile ?? profileContainer;
         const weakList = profile?.weak_knowledge ?? [];
-        setWeakPoints(Array.isArray(weakList) ? weakList : []);
+        setWeakPoints(Array.isArray(weakList) ? dedupeWeakKnowledgePoints(weakList) : []);
       } catch {
         console.error('Profile parse failed, response body snippet:', rawText.slice(0, 240));
         throw new Error('Profile response不是有效JSON');

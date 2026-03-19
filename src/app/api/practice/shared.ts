@@ -59,11 +59,11 @@ const parseResponsePayload = (rawText: string) => {
   }
 };
 
-export const proxyPost = async (path: string, payload: Record<string, unknown>) => {
+const proxyRequest = async (method: 'POST' | 'PUT', path: string, payload: Record<string, unknown>) => {
   const upstream = `${PRACTICE_API_BASE.replace(/\/+$/, '')}${path}`;
   try {
     const res = await fetch(upstream, {
-      method: 'POST',
+      method,
       headers: {
         'Content-Type': 'application/json',
       },
@@ -74,7 +74,7 @@ export const proxyPost = async (path: string, payload: Record<string, unknown>) 
     const data = parseResponsePayload(rawText);
     return NextResponse.json(data, { status: res.status });
   } catch (error) {
-    console.error(`Practice proxy failed (${path})`, error);
+    console.error(`Practice proxy failed (${method} ${path})`, error);
     return NextResponse.json(
       { error: 'Practice proxy failed' },
       { status: 502 }
@@ -82,3 +82,8 @@ export const proxyPost = async (path: string, payload: Record<string, unknown>) 
   }
 };
 
+export const proxyPost = async (path: string, payload: Record<string, unknown>) =>
+  proxyRequest('POST', path, payload);
+
+export const proxyPut = async (path: string, payload: Record<string, unknown>) =>
+  proxyRequest('PUT', path, payload);

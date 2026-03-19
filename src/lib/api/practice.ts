@@ -1,4 +1,4 @@
-import { apiPost } from '@/lib/api/client';
+import { apiPost, apiPut } from '@/lib/api/client';
 
 export type PracticeStrategy = 'weakest' | 'spaced';
 export type ChoiceOption = 'A' | 'B' | 'C' | 'D';
@@ -30,7 +30,6 @@ export interface SingleQuestionRequest {
   score_mode?: 'sum' | 'max' | 'min';
   top_k_weak?: number;
   max_candidates?: number;
-  interval_days?: number;
   alpha?: number;
   beta?: number;
   mastery_threshold?: number;
@@ -116,10 +115,29 @@ export interface PracticeAnalysisResponse {
   analysis: string;
 }
 
+interface RawIntervalDaysResponse {
+  user_id?: unknown;
+  interval_days?: unknown;
+}
+
+export interface IntervalDaysResponse {
+  userId: string;
+  intervalDays: number;
+}
+
 const asString = (value: unknown, fallback = '') => {
   if (typeof value !== 'string') return fallback;
   const text = value.trim();
   return text || fallback;
+};
+
+const asNumber = (value: unknown, fallback = 0) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
 };
 
 const normalizeOption = (value: unknown): ChoiceOption => {
@@ -233,3 +251,14 @@ export const generatePracticeAnalysis = (payload: {
   user_reply?: string;
   user_id?: string;
 }) => apiPost<PracticeAnalysisResponse>('/api/practice/analysis', payload);
+
+export const updatePracticeIntervalDays = async (payload: {
+  interval_days: number;
+  user_id?: string;
+}) => {
+  const raw = await apiPut<RawIntervalDaysResponse>('/api/practice/interval-days', payload);
+  return {
+    userId: asString(raw.user_id, asString(payload.user_id)),
+    intervalDays: Math.round(asNumber(raw.interval_days, payload.interval_days)),
+  } as IntervalDaysResponse;
+};
