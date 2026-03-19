@@ -471,58 +471,6 @@ export const mockUserProfile = () => {
   };
 };
 
-// ==================== TEACHER DASHBOARD API ====================
-export const mockTeacherDashboard = (classId?: string, range?: string) => {
-  return {
-    completionRate: [
-      { label: '本周', rate: 78 },
-      { label: '上周', rate: 65 },
-      { label: '本月', rate: 72 }
-    ],
-    errorTop: [
-      { type: '段错误', count: 45 },
-      { type: '数组越界', count: 38 },
-      { type: '内存泄漏', count: 22 },
-      { type: '空指针', count: 18 },
-      { type: '未初始化变量', count: 15 }
-    ],
-    weakTop: [
-      { name: '指针', score: 45 },
-      { name: '链表', score: 52 },
-      { name: '递归', score: 58 },
-      { name: '动态内存', score: 61 },
-      { name: '结构体', score: 68 }
-    ],
-    students: [
-      { id: '1', name: '张三', questionsPerWeek: 5, practiceAccuracy: 78, weak: ['指针', '链表'] },
-      { id: '2', name: '李四', questionsPerWeek: 3, practiceAccuracy: 85, weak: ['递归'] },
-      { id: '3', name: '王五', questionsPerWeek: 8, practiceAccuracy: 65, weak: ['指针', '数组'] },
-      { id: '4', name: '赵六', questionsPerWeek: 4, practiceAccuracy: 72, weak: ['动态内存'] },
-      { id: '5', name: '孙七', questionsPerWeek: 6, practiceAccuracy: 80, weak: ['结构体'] }
-    ],
-    clusters: [
-      {
-        clusterId: 'cluster-1',
-        label: '指针越界与段错误',
-        topKeywords: ['指针', '越界', '段错误'],
-        count: 24
-      },
-      {
-        clusterId: 'cluster-2',
-        label: '递归终止条件',
-        topKeywords: ['递归', '终止条件', '栈溢出'],
-        count: 18
-      },
-      {
-        clusterId: 'cluster-3',
-        label: '链表内存管理',
-        topKeywords: ['链表', '内存', '释放'],
-        count: 12
-      }
-    ]
-  };
-};
-
 // ==================== TEACHER REQUIREMENTS API ====================
 export const mockTeacherRequirements = (classId?: string) => {
   return {

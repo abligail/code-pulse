@@ -305,7 +305,7 @@ const splitAnswers = (text: string): string[] => {
 const RECOMMENDATION_SECTION_LABEL = '【推荐学习网站】';
 const RECOMMENDATION_END_LABEL = '【薄弱点提醒】';
 const SECTION_BOUNDARY_REGEX = /【[^】]+】/;
-const RECOMMENDATION_ENTRY_REGEX = /(?:^|[\s。；;、])(?:\d+[\.\uFF0E、]?\s*)?([^：:\n]+?)[:：]\s*(https?:\/\/[^\s)）]+)(?:\s*[（(]([^（）()]+)[）)])?/g;
+const RECOMMENDATION_ENTRY_REGEX = /(?:^|[\s。；;、])(?:\d+[\.\uFF0E、]?\s*)?([^：:\n]+?)[:：]\s*(https?:\/\/[^\s\u4e00-\u9fff（【「『《()）】」』》]+)(?:\s*[（(]([^（）()]+)[）)])?/g;
 
 const sanitizeRecommendationLine = (line: string) =>
   line
@@ -313,14 +313,22 @@ const sanitizeRecommendationLine = (line: string) =>
     .replace(/^[*-]\s*/, '')
     .trim();
 
+const cleanRecommendationUrl = (rawUrl: string) =>
+  rawUrl
+    .trim()
+    .split(/[（【「『《\u4e00-\u9fff]/, 1)[0]
+    .replace(/[，。；、：！？,.!?:;'"”’）】」』》]+$/, '')
+    .replace(/[（【「『《(]+$/, '');
+
 const parseRecommendationLines = (lines: string[]): RecommendationLink[] => {
   const items: RecommendationLink[] = [];
   lines.forEach((line) => {
     const normalized = sanitizeRecommendationLine(line);
     if (!normalized) return;
-    const urlMatch = normalized.match(/https?:\/\/[^\s)）]+/i);
+    const urlMatch = normalized.match(/https?:\/\/[^\s\u4e00-\u9fff（【「『《()）】」』》]+/i);
     if (!urlMatch || urlMatch.index === undefined) return;
-    const url = urlMatch[0];
+    const url = cleanRecommendationUrl(urlMatch[0]);
+    if (!url) return;
     const beforeUrl = normalized.slice(0, urlMatch.index).replace(/[：:]\s*$/, '').trim();
     const afterUrl = normalized.slice(urlMatch.index + url.length).trim();
     let description = '';
@@ -345,7 +353,7 @@ const parseRecommendationSection = (sectionBody: string): RecommendationLink[] =
   let match: RegExpExecArray | null;
   while ((match = RECOMMENDATION_ENTRY_REGEX.exec(sectionBody)) !== null) {
     const rawTitle = match[1]?.trim();
-    const url = match[2]?.trim();
+    const url = cleanRecommendationUrl(match[2] ?? '');
     if (!rawTitle || !url) continue;
     const normalizedTitle = rawTitle.replace(/^[\d\.\uFF0E、,，\s-]+/, '') || rawTitle;
     const description = match[3]?.trim();
@@ -929,6 +937,10 @@ export default function ChatPage() {
     try {
       const url = `/api/user-profile?userId=${encodeURIComponent(userId)}`;
       const res = await fetch(url, { cache: 'no-store' });
+      if (res.status === 404) {
+        setWeakPoints([]);
+        return;
+      }
       if (!res.ok) throw new Error(`Fetch profile failed: ${res.status}`);
       const rawText = await res.text();
       try {

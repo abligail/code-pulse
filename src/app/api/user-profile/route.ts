@@ -17,7 +17,11 @@ export async function GET(req: Request) {
   try {
     const res = await fetch(upstream, { cache: 'no-store' });
     if (!res.ok) {
-      return NextResponse.json({ error: 'Upstream error', status: res.status }, { status: 502 });
+      const body = await res.text().catch(() => '');
+      return NextResponse.json(
+        { error: 'Upstream error', status: res.status, body: body.slice(0, 240) },
+        { status: res.status === 404 ? 404 : 502 }
+      );
     }
     const data = await res.json();
     return NextResponse.json(data);
